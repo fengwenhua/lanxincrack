@@ -1,34 +1,69 @@
-/* How to Hook with Logos
-Hooks are written with syntax similar to that of an Objective-C @implementation.
-You don't need to #include <substrate.h>, it will be done automatically, as will
-the generation of a class list and an automatic constructor.
+%hook sub_1000010100215841
 
-%hook ClassName
-
-// Hooking a class method
-+ (id)sharedInstance {
-	return %orig;
++ (BOOL)sub_1000010100215849 {
+	return NO;
 }
 
-// Hooking an instance method with an argument.
-- (void)messageName:(int)argument {
-	%log; // Write a message about this call, including its class, name and arguments, to the system log.
-
-	%orig; // Call through to the original function with its original arguments.
-	%orig(nil); // Call through to the original function with a custom argument.
-
-	// If you use %orig(), you MUST supply all arguments (except for self and _cmd, the automatically generated ones.)
++ (void)sub_1000010100215846 {
 }
 
-// Hooking an instance method with no arguments.
-- (id)noArguments {
-	%log;
-	id awesome = %orig;
-	[awesome doSomethingElse];
-
-	return awesome;
++ (void)sub_1000010100215842 {
 }
 
-// Always make sure you clean up after yourself; Not doing so could have grave consequences!
++ (void)sub_1000010100215847 {
+}
+
++ (void)sub_1000010100215845 {
+}
+
 %end
-*/
+
+%hook sub_1000010100215832
+
++ (BOOL)sub_1000010100215833 {
+	return NO;
+}
+
++ (BOOL)sub_1000010100215834 {
+	return NO;
+}
+
++ (BOOL)sub_1000010100215837 {
+	return NO;
+}
+
+%end
+
+%hook sub_2105813100215866
+
++ (BOOL)autoCheck {
+	return NO;
+}
+
+%end
+
+%hook sub_1000010100215866
+
++ (BOOL)sub_1000010100215867:(id)arg1 {
+	return NO;
+}
+
+%end
+
+%hook sub_3108813100215323
+
++ (void)autocheck {
+}
+
++ (void)checkRoot {
+}
+
+%end
+
+%hook CoreMessUtils
+
++ (BOOL)isJailBreak {
+	return NO;
+}
+
+%end
