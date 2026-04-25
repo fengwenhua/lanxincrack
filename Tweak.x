@@ -66,4 +66,36 @@
 	return NO;
 }
 
++ (BOOL)isJailBreak1 {
+	return NO;
+}
+
++ (BOOL)isJailBreak2 {
+	return NO;
+}
+
++ (BOOL)isJailBreak3 {
+	return NO;
+}
+
++ (BOOL)isJailBreak4 {
+	return NO;
+}
+
++ (BOOL)isJailBreak5 {
+	return NO;
+}
+
++ (BOOL)isJailBreak6 {
+	return NO;
+}
+
++ (BOOL)isJailBreak7 {
+	return NO;
+}
+
++ (BOOL)isJailBreak8 {
+	return NO;
+}
+
 %end
