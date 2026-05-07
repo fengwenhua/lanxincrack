@@ -8,6 +8,6 @@ TWEAK_NAME = lanxincrack
 
 lanxincrack_FILES = Tweak.x
 lanxincrack_CFLAGS = -fobjc-arc
-iCost_FRAMEWORKS = Foundation UIKit
+lanxincrack_FRAMEWORKS = Foundation UIKit
 
 include $(THEOS_MAKE_PATH)/tweak.mk
