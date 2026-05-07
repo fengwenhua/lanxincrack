@@ -18,6 +18,25 @@
 
 %end
 
+%hook IMCoreMessage
+
+- (int)msgState {
+	int state = %orig;
+	if (state == 6 || state == 7) {
+		return 5;
+	}
+	return state;
+}
+
+- (void)setMsgState:(int)state {
+	if (state == 6 || state == 7) {
+		return;
+	}
+	%orig(state);
+}
+
+%end
+
 %hook sub_1000010100215832
 
 + (BOOL)sub_1000010100215833 {
