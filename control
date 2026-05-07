@@ -6,4 +6,4 @@ Description: A crack for Lanxin
 Maintainer: panghoo
 Author: panghoo
 Section: Tweaks
-Depends: mobilesubstrate
+Depends: ellekit | mobilesubstrate

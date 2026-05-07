@@ -4,9 +4,15 @@
 <dict>
 	<key>Filter</key>
 	<dict>
+		<key>Mode</key>
+		<string>Any</string>
 		<key>Bundles</key>
 		<array>
 			<string>com.comisys.lanxinPlus</string>
+		</array>
+		<key>Executables</key>
+		<array>
+			<string>Lanxin</string>
 		</array>
 	</dict>
 </dict>

@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 # 编译
 make clean
