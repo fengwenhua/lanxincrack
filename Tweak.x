@@ -22,6 +22,7 @@ static const void *kLxChatBadgeLastPositiveTsKey = &kLxChatBadgeLastPositiveTsKe
 static const void *kLxChatBadgeLastSourcePathKey = &kLxChatBadgeLastSourcePathKey;
 static const void *kLxChatBadgeVisibleKey = &kLxChatBadgeVisibleKey;
 static NSString *const kLXBuildID = LX_BUILD_ID;
+static NSString *const kLxRecalledBadgeText = @"[撤]";
 
 static NSString *LxPrimaryLogPath(void) {
 	return [NSHomeDirectory() stringByAppendingPathComponent:
@@ -1089,7 +1090,7 @@ __attribute__((unused)) static void LxUpdateGenericCellBadge(id cell, NSString *
 	if (!badge) {
 		badge = [[UILabel alloc] initWithFrame:CGRectZero];
 		badge.tag = kLxGenericRecalledBadgeTag;
-		badge.text = @"[已撤回]";
+		badge.text = kLxRecalledBadgeText;
 		badge.font = [UIFont systemFontOfSize:10.0 weight:UIFontWeightBold];
 		badge.textColor = [UIColor whiteColor];
 		badge.textAlignment = NSTextAlignmentCenter;
@@ -1101,8 +1102,9 @@ __attribute__((unused)) static void LxUpdateGenericCellBadge(id cell, NSString *
 	}
 
 	[contentView bringSubviewToFront:badge];
+	badge.text = kLxRecalledBadgeText;
 	[badge sizeToFit];
-	CGFloat badgeW = MAX(58.0, CGRectGetWidth(badge.bounds) + 10.0);
+	CGFloat badgeW = MAX(34.0, CGRectGetWidth(badge.bounds) + 10.0);
 	CGFloat badgeH = MAX(18.0, CGRectGetHeight(badge.bounds) + 4.0);
 	badge.frame = CGRectMake(8.0, 4.0, badgeW, badgeH);
 	if (LxShouldLogGenericBadge()) {
@@ -1189,7 +1191,7 @@ static void LxUpdateChatMsgCellBadge(id cell, NSString *reason) {
 	if (!badge) {
 		badge = [[UILabel alloc] initWithFrame:CGRectZero];
 		badge.tag = kLxGenericRecalledBadgeTag;
-		badge.text = @"[已撤回]";
+		badge.text = kLxRecalledBadgeText;
 		badge.font = [UIFont systemFontOfSize:10.0 weight:UIFontWeightBold];
 		badge.textColor = [UIColor whiteColor];
 		badge.textAlignment = NSTextAlignmentCenter;
@@ -1200,22 +1202,38 @@ static void LxUpdateChatMsgCellBadge(id cell, NSString *reason) {
 		[contentView addSubview:badge];
 	}
 	[contentView bringSubviewToFront:badge];
+	badge.text = kLxRecalledBadgeText;
 	[badge sizeToFit];
-	CGFloat badgeW = MAX(58.0, CGRectGetWidth(badge.bounds) + 10.0);
-	CGFloat badgeH = MAX(18.0, CGRectGetHeight(badge.bounds) + 4.0);
+	CGFloat badgeW = MAX(34.0, CGRectGetWidth(badge.bounds) + 10.0);
+	CGFloat badgeH = MAX(16.0, CGRectGetHeight(badge.bounds) + 4.0);
 	CGRect anchor = LxChatBubbleAnchorRect(cell, contentView, fromSelfKnown, fromSelf);
 	CGFloat contentW = CGRectGetWidth(contentView.bounds);
+	CGFloat contentMidX = CGRectGetMidX(contentView.bounds);
+	CGFloat anchorMidX = CGRectGetMidX(anchor);
+	if (!fromSelfKnown && fabs(anchorMidX - contentMidX) >= 1.0) {
+		fromSelf = (anchorMidX > contentMidX);
+		fromSelfKnown = YES;
+		anchor = LxChatBubbleAnchorRect(cell, contentView, fromSelfKnown, fromSelf);
+	}
+
+	BOOL placeOutside = (CGRectGetMinY(anchor) - badgeH - 2.0 >= 1.0);
 	CGFloat x = fromSelf ? (CGRectGetMinX(anchor) + 4.0) : (CGRectGetMaxX(anchor) - badgeW - 4.0);
+	if (placeOutside) {
+		// Place at bubble outer-top corner to avoid covering message text.
+		x = fromSelf ? (CGRectGetMinX(anchor) - badgeW * 0.15) : (CGRectGetMaxX(anchor) - badgeW * 0.85);
+	}
 	x = MAX(2.0, MIN(contentW - badgeW - 2.0, x));
-	CGFloat y = MAX(2.0, CGRectGetMinY(anchor) + 2.0);
+	CGFloat y = placeOutside ? (CGRectGetMinY(anchor) - badgeH - 2.0) : (CGRectGetMinY(anchor) + 2.0);
+	y = MAX(1.0, y);
 	badge.frame = CGRectMake(x, y, badgeW, badgeH);
 	if (wasHidden && LxShouldLogGenericBadge()) {
-		LxLogLine(@"[LXPATCH] chat badge show cell=%@ ptr=%p reason=%@ side=%@ known=%d path=%@ target=%@ frame={%.1f,%.1f,%.1f,%.1f}",
+		LxLogLine(@"[LXPATCH] chat badge show cell=%@ ptr=%p reason=%@ side=%@ known=%d place=%@ path=%@ target=%@ frame={%.1f,%.1f,%.1f,%.1f}",
 		          LxClassName(cell),
 		          cell,
 		          reason ?: @"(nil)",
 		          fromSelf ? @"self" : @"other",
 		          fromSelfKnown ? 1 : 0,
+		          placeOutside ? @"outside" : @"inside",
 		          path ?: @"(none)",
 		          LxClassName(target),
 		          badge.frame.origin.x, badge.frame.origin.y, badge.frame.size.width, badge.frame.size.height);
@@ -1406,7 +1424,7 @@ static void LxUpdateHistoryCellRecalledBadge(id cell, id chatEx, BOOL recalled) 
 	if (!badge) {
 		badge = [[UILabel alloc] initWithFrame:CGRectZero];
 		badge.tag = kLxHistoryRecalledBadgeTag;
-		badge.text = @"[已撤回]";
+		badge.text = kLxRecalledBadgeText;
 		badge.font = [UIFont boldSystemFontOfSize:11.0];
 		badge.textColor = [UIColor whiteColor];
 		badge.textAlignment = NSTextAlignmentCenter;
@@ -1421,8 +1439,9 @@ static void LxUpdateHistoryCellRecalledBadge(id cell, id chatEx, BOOL recalled) 
 	}
 
 	[contentView bringSubviewToFront:badge];
+	badge.text = kLxRecalledBadgeText;
 	[badge sizeToFit];
-	CGFloat badgeW = MAX(58.0, CGRectGetWidth(badge.bounds) + 12.0);
+	CGFloat badgeW = MAX(34.0, CGRectGetWidth(badge.bounds) + 12.0);
 	CGFloat badgeH = MAX(18.0, CGRectGetHeight(badge.bounds) + 4.0);
 	CGFloat contentW = CGRectGetWidth(contentView.bounds);
 	if (contentW < 80.0) {
@@ -1713,7 +1732,7 @@ static void LxUpdateHistoryCellRecalledBadge(id cell, id chatEx, BOOL recalled) 
 	if (!badge) {
 		badge = [[UILabel alloc] initWithFrame:CGRectZero];
 		badge.tag = kLxRecalledBadgeTag;
-		badge.text = @"已撤回";
+		badge.text = @"撤";
 		badge.font = [UIFont systemFontOfSize:10.0 weight:UIFontWeightSemibold];
 		badge.textColor = [UIColor whiteColor];
 		badge.textAlignment = NSTextAlignmentCenter;
@@ -1725,6 +1744,7 @@ static void LxUpdateHistoryCellRecalledBadge(id cell, id chatEx, BOOL recalled) 
 	}
 
 	[bubbleView bringSubviewToFront:badge];
+	badge.text = @"撤";
 	[badge sizeToFit];
 	CGFloat padX = 6.0;
 	CGFloat padY = 2.0;
