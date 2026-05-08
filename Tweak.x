@@ -114,6 +114,13 @@ static void LxLogLine(NSString *format, ...) {
 	});
 }
 
+static BOOL LxShouldLogWatermarkEvent(void) {
+	static int count = 0;
+	if (count >= 120) return NO;
+	count++;
+	return YES;
+}
+
 static inline id LxObjcMsgSendId(id target, SEL selector) {
 	if (!target || !selector) return nil;
 	if (![target respondsToSelector:selector]) return nil;
@@ -1164,6 +1171,82 @@ static void LxUpdateHistoryCellRecalledBadge(id cell, id chatEx, BOOL recalled) 
 	LxTrackRecalledChatData(content, YES);
 	LxTrackRecalledMessageKeyIfAny(content);
 	return content;
+}
+
+%end
+
+%hook LxOrgClientModel
+
+- (BOOL)show_watermark {
+	BOOL orig = %orig;
+	if (LxShouldLogWatermarkEvent()) {
+		LxLogLine(@"[LXWATER] force show_watermark=0 orig=%d self=%p", orig ? 1 : 0, self);
+	}
+	return NO;
+}
+
+- (id)show_watermark_types {
+	id orig = %orig;
+	if (LxShouldLogWatermarkEvent()) {
+		LxLogLine(@"[LXWATER] force show_watermark_types=nil orig=%@ self=%p", LxClassName(orig), self);
+	}
+	return nil;
+}
+
+- (void)setShow_watermark:(BOOL)show {
+	if (LxShouldLogWatermarkEvent()) {
+		LxLogLine(@"[LXWATER] setShow_watermark override input=%d -> 0 self=%p", show ? 1 : 0, self);
+	}
+	%orig(NO);
+}
+
+- (void)setShow_watermark_types:(id)types {
+	if (LxShouldLogWatermarkEvent()) {
+		LxLogLine(@"[LXWATER] setShow_watermark_types override input=%@ -> nil self=%p",
+		          LxClassName(types), self);
+	}
+	%orig(nil);
+}
+
+%end
+
+%hook WatermarkService
+
++ (void)hiddenWatermark:(BOOL)hidden {
+	if (LxShouldLogWatermarkEvent()) {
+		LxLogLine(@"[LXWATER] +hiddenWatermark force hidden=1 input=%d", hidden ? 1 : 0);
+	}
+	%orig(YES);
+}
+
+- (BOOL)isShowWatermark {
+	BOOL orig = %orig;
+	if (LxShouldLogWatermarkEvent()) {
+		LxLogLine(@"[LXWATER] -isShowWatermark force=0 orig=%d self=%p", orig ? 1 : 0, self);
+	}
+	return NO;
+}
+
+- (BOOL)complyWatermarkRule:(id)viewController {
+	BOOL orig = %orig(viewController);
+	if (LxShouldLogWatermarkEvent()) {
+		LxLogLine(@"[LXWATER] -complyWatermarkRule force=0 orig=%d vc=%@ self=%p",
+		          orig ? 1 : 0, LxClassName(viewController), self);
+	}
+	return NO;
+}
+
+- (void)configViewControllerWatermark:(id)viewController {
+	if (LxShouldLogWatermarkEvent()) {
+		LxLogLine(@"[LXWATER] -configViewControllerWatermark skip vc=%@ self=%p",
+		          LxClassName(viewController), self);
+	}
+}
+
+- (void)updateWatermarkDateIfNeeded {
+	if (LxShouldLogWatermarkEvent()) {
+		LxLogLine(@"[LXWATER] -updateWatermarkDateIfNeeded skip self=%p", self);
+	}
 }
 
 %end
