@@ -16,6 +16,11 @@ static const NSInteger kLxHistoryRecalledBadgeTag = 0x4C584852; // "LXHR"
 static const NSInteger kLxGenericRecalledBadgeTag = 0x4C584743; // "LXGC"
 static const void *kLxRecalledFlagKey = &kLxRecalledFlagKey;
 static const void *kLxChatBadgeKnownRecalledStateKey = &kLxChatBadgeKnownRecalledStateKey;
+static const void *kLxChatBadgePendingStateKey = &kLxChatBadgePendingStateKey;
+static const void *kLxChatBadgePendingCountKey = &kLxChatBadgePendingCountKey;
+static const void *kLxChatBadgeLastPositiveTsKey = &kLxChatBadgeLastPositiveTsKey;
+static const void *kLxChatBadgeLastSourcePathKey = &kLxChatBadgeLastSourcePathKey;
+static const void *kLxChatBadgeVisibleKey = &kLxChatBadgeVisibleKey;
 static NSString *const kLXBuildID = LX_BUILD_ID;
 
 static NSString *LxPrimaryLogPath(void) {
@@ -638,12 +643,12 @@ static LxChatRecalledState LxScanChatMsgCellForRecalled(id cell, NSString **outP
 	static dispatch_once_t onceToken;
 	dispatch_once(&onceToken, ^{
 		preferredIvars = @[
-			@"msg", @"chatData", @"chatDataWhenTouchBegin", @"templateContent",
+			@"msg", @"chatDataWhenTouchBegin", @"chatData", @"templateContent",
 			@"_chatEx", @"_msgData", @"_chatData", @"_msgModel", @"_message", @"_data", @"_model",
 			@"_item", @"_cellItem", @"_elementModel", @"_record", @"_imMessage"
 		];
 		preferredSelectors = @[
-			@"msg", @"chatData", @"chatDataWhenTouchBegin", @"templateContent",
+			@"msg", @"chatDataWhenTouchBegin", @"chatData", @"templateContent",
 			@"chatEx", @"msgData", @"msgModel", @"message", @"data", @"model", @"item",
 			@"cellItem", @"elementModel", @"record", @"imMessage", @"messageModel", @"viewModel"
 		];
@@ -979,26 +984,61 @@ static void LxUpdateChatMsgCellBadge(id cell, NSString *reason) {
 	UILabel *badge = (UILabel *)[contentView viewWithTag:kLxGenericRecalledBadgeTag];
 	NSNumber *known = objc_getAssociatedObject(cell, kLxChatBadgeKnownRecalledStateKey);
 	BOOL knownRecalled = known.boolValue;
+	NSNumber *visibleNum = objc_getAssociatedObject(cell, kLxChatBadgeVisibleKey);
+	BOOL visible = visibleNum ? visibleNum.boolValue : (badge != nil);
+	NSNumber *pendingStateNum = objc_getAssociatedObject(cell, kLxChatBadgePendingStateKey);
+	NSNumber *pendingCountNum = objc_getAssociatedObject(cell, kLxChatBadgePendingCountKey);
+	NSInteger pendingState = pendingStateNum ? pendingStateNum.integerValue : LxChatRecalledStateUnknown;
+	NSInteger pendingCount = pendingCountNum ? pendingCountNum.integerValue : 0;
+	NSNumber *lastPositiveTsNum = objc_getAssociatedObject(cell, kLxChatBadgeLastPositiveTsKey);
+	NSTimeInterval lastPositiveTs = lastPositiveTsNum ? lastPositiveTsNum.doubleValue : 0;
+	NSString *lastSourcePath = objc_getAssociatedObject(cell, kLxChatBadgeLastSourcePathKey);
 
 	if (state == LxChatRecalledStateUnknown) {
 		return;
 	}
 
 	if (state == LxChatRecalledStateNotRecalled) {
+		if (pendingState == LxChatRecalledStateNotRecalled) {
+			pendingCount += 1;
+		} else {
+			pendingState = LxChatRecalledStateNotRecalled;
+			pendingCount = 1;
+		}
+		objc_setAssociatedObject(cell, kLxChatBadgePendingStateKey, @(pendingState), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		objc_setAssociatedObject(cell, kLxChatBadgePendingCountKey, @(pendingCount), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+		NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+		double ageMs = (lastPositiveTs > 0) ? ((now - lastPositiveTs) * 1000.0) : DBL_MAX;
+		BOOL sameSource = (lastSourcePath.length == 0 || [lastSourcePath isEqualToString:(path ?: @"(none)")]);
+		BOOL shouldRemove = (pendingCount >= 4 && ageMs >= 350.0 && sameSource);
+		if (!shouldRemove) {
+			return;
+		}
+
 		objc_setAssociatedObject(cell, kLxChatBadgeKnownRecalledStateKey, @(NO), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		objc_setAssociatedObject(cell, kLxChatBadgePendingStateKey, @(LxChatRecalledStateUnknown), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		objc_setAssociatedObject(cell, kLxChatBadgePendingCountKey, @(0), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		objc_setAssociatedObject(cell, kLxChatBadgeVisibleKey, @(NO), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 		if (badge) {
 			[badge removeFromSuperview];
 			if (LxShouldLogGenericBadge()) {
-				LxLogLine(@"[LXPATCH] chat badge remove cell=%@ reason=%@",
-				          LxClassName(cell), reason ?: @"(nil)");
+				LxLogLine(@"[LXPATCH] chat badge remove cell=%@ reason=%@ path=%@ negStreak=%ld ageMs=%.1f",
+				          LxClassName(cell), reason ?: @"(nil)", path ?: @"(none)", (long)pendingCount, ageMs);
 			}
 		}
 		return;
 	}
 
+	NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
 	objc_setAssociatedObject(cell, kLxChatBadgeKnownRecalledStateKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	objc_setAssociatedObject(cell, kLxChatBadgePendingStateKey, @(LxChatRecalledStateUnknown), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	objc_setAssociatedObject(cell, kLxChatBadgePendingCountKey, @(0), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	objc_setAssociatedObject(cell, kLxChatBadgeLastPositiveTsKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	objc_setAssociatedObject(cell, kLxChatBadgeLastSourcePathKey, path ?: @"(none)", OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	objc_setAssociatedObject(cell, kLxChatBadgeVisibleKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-	BOOL wasHidden = (badge == nil);
+	BOOL wasHidden = (badge == nil || !visible || !knownRecalled);
 	if (!badge) {
 		badge = [[UILabel alloc] initWithFrame:CGRectZero];
 		badge.tag = kLxGenericRecalledBadgeTag;
@@ -1017,7 +1057,7 @@ static void LxUpdateChatMsgCellBadge(id cell, NSString *reason) {
 	CGFloat badgeW = MAX(58.0, CGRectGetWidth(badge.bounds) + 10.0);
 	CGFloat badgeH = MAX(18.0, CGRectGetHeight(badge.bounds) + 4.0);
 	badge.frame = CGRectMake(8.0, 4.0, badgeW, badgeH);
-	if ((wasHidden || !knownRecalled) && LxShouldLogGenericBadge()) {
+	if (wasHidden && LxShouldLogGenericBadge()) {
 		LxLogLine(@"[LXPATCH] chat badge show cell=%@ reason=%@ path=%@ target=%@ frame={%.1f,%.1f,%.1f,%.1f}",
 		          LxClassName(cell),
 		          reason ?: @"(nil)",
@@ -1460,37 +1500,27 @@ static void LxUpdateHistoryCellRecalledBadge(id cell, id chatEx, BOOL recalled) 
 
 - (void)setChatData:(id)chatData {
 	%orig(chatData);
-	LxDiagnoseCell(self, @"LxChatMsgCell.setChatData");
-	LxUpdateChatMsgCellBadge(self, @"LxChatMsgCell.setChatData");
 }
 
 - (void)setMsg:(id)msg {
 	%orig(msg);
-	LxDiagnoseCell(self, @"LxChatMsgCell.setMsg");
-	LxUpdateChatMsgCellBadge(self, @"LxChatMsgCell.setMsg");
 }
 
 - (void)setTemplateContent:(id)templateContent {
 	%orig(templateContent);
-	LxDiagnoseCell(self, @"LxChatMsgCell.setTemplateContent");
-	LxUpdateChatMsgCellBadge(self, @"LxChatMsgCell.setTemplateContent");
 }
 
 - (void)setChatDataWhenTouchBegin:(id)chatDataWhenTouchBegin {
 	%orig(chatDataWhenTouchBegin);
-	LxDiagnoseCell(self, @"LxChatMsgCell.setChatDataWhenTouchBegin");
-	LxUpdateChatMsgCellBadge(self, @"LxChatMsgCell.setChatDataWhenTouchBegin");
 }
 
 - (void)didMoveToWindow {
 	%orig;
-	LxDiagnoseCell(self, @"LxChatMsgCell.didMoveToWindow");
 	LxUpdateChatMsgCellBadge(self, @"LxChatMsgCell.didMoveToWindow");
 }
 
 - (void)layoutSubviews {
 	%orig;
-	LxDiagnoseCell(self, @"LxChatMsgCell.layoutSubviews");
 	LxUpdateChatMsgCellBadge(self, @"LxChatMsgCell.layoutSubviews");
 }
 
@@ -1502,6 +1532,11 @@ static void LxUpdateHistoryCellRecalledBadge(id cell, id chatEx, BOOL recalled) 
 		[badge removeFromSuperview];
 	}
 	objc_setAssociatedObject(self, kLxChatBadgeKnownRecalledStateKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	objc_setAssociatedObject(self, kLxChatBadgePendingStateKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	objc_setAssociatedObject(self, kLxChatBadgePendingCountKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	objc_setAssociatedObject(self, kLxChatBadgeLastPositiveTsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	objc_setAssociatedObject(self, kLxChatBadgeLastSourcePathKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	objc_setAssociatedObject(self, kLxChatBadgeVisibleKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 %end
