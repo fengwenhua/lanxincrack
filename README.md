@@ -11,6 +11,9 @@
 3. 撤回角标（聊天气泡显示撤回标识 `[撤]`）。
 4. 开屏页跳过（每次打开都有广告，受不了）。
 
+<img width="345" height="688" alt="image" src="https://github.com/user-attachments/assets/f5cecfdf-a5a9-421a-81ad-d9413a064733" />
+
+
 ## 目录说明
 
 - `Tweak.x`：核心 Hook 与逻辑实现。
