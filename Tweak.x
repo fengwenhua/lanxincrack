@@ -1281,6 +1281,26 @@ static void LxUpdateHistoryCellRecalledBadge(id cell, id chatEx, BOOL recalled) 
 
 %end
 
+%hook LxSplashManager
+
++ (void)startPageViewShowWithOid:(int)oid launchOptions:(id)launchOptions gestureBiometricBlock:(id)gestureBiometricBlock {
+	BOOL hasBlock = (gestureBiometricBlock != nil);
+	LxLogLine(@"[LXPATCH] splash bypass oid=%d hasBlock=%d launchOptions=%@",
+	          oid, hasBlock ? 1 : 0, LxClassName(launchOptions));
+
+	if (!hasBlock) {
+		LxLogLine(@"[LXPATCH] splash bypass fallback-to-orig reason=no-block oid=%d", oid);
+		%orig;
+		return;
+	}
+
+	void (^block)(void) = (void (^)(void))gestureBiometricBlock;
+	block();
+	LxLogLine(@"[LXPATCH] splash bypass done oid=%d", oid);
+}
+
+%end
+
 %hook sub_1000010100215832
 
 + (BOOL)sub_1000010100215833 {
