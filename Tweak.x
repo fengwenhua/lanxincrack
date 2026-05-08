@@ -175,7 +175,11 @@ static void LxTrackRecalledChatData(id chatData, BOOL recalled) {
 		[map setObject:@(recalled) forKey:chatData];
 	}
 	if (shouldLog) {
-		LxLogLine(@"track chatData=%p recalled=%d", chatData, recalled ? 1 : 0);
+		static int trackLogCount = 0;
+		if (trackLogCount < 100) {
+			trackLogCount++;
+			LxLogLine(@"track chatData=%p recalled=%d", chatData, recalled ? 1 : 0);
+		}
 	}
 }
 
@@ -299,7 +303,6 @@ static void LxTrackRecalledMessageKeyIfAny(id obj) {
 	@synchronized (set) {
 		[set addObject:key];
 	}
-	LxLogLine(@"track key=%@", key);
 }
 
 static BOOL LxIsRecalledMessageByKey(id obj) {
@@ -336,7 +339,7 @@ static BOOL LxShouldLogDeepHitForObject(id obj) {
 
 static BOOL LxShouldLogDiagLine(void) {
 	static int count = 0;
-	if (count >= 1200) return NO;
+	if (count >= 300) return NO;
 	count++;
 	return YES;
 }
@@ -912,12 +915,154 @@ static BOOL LxCellRecalledState(id cell, id *outTarget, NSString **outSelPath) {
 
 static BOOL LxShouldLogGenericBadge(void) {
 	static int count = 0;
-	if (count >= 300) return NO;
+	if (count >= 160) return NO;
 	count++;
 	return YES;
 }
 
-static void LxUpdateGenericCellBadge(id cell, NSString *reason) {
+static BOOL LxReadBoolBySelector(id obj, NSString *selName, BOOL *ok) {
+	if (ok) *ok = NO;
+	if (!obj || selName.length == 0) return NO;
+	SEL sel = NSSelectorFromString(selName);
+	if (!sel || ![obj respondsToSelector:sel]) return NO;
+	Method m = class_getInstanceMethod([obj class], sel);
+	if (!m || method_getNumberOfArguments(m) != 2) return NO;
+	char retType[16] = {0};
+	method_getReturnType(m, retType, sizeof(retType));
+	BOOL value = NO;
+	switch (retType[0]) {
+		case 'B':
+		case 'c':
+			value = ((BOOL (*)(id, SEL))objc_msgSend)(obj, sel);
+			if (ok) *ok = YES;
+			return value;
+		case 'i':
+		case 's':
+		case 'l':
+		case 'q':
+		case 'I':
+		case 'S':
+		case 'L':
+		case 'Q': {
+			long long n = ((long long (*)(id, SEL))objc_msgSend)(obj, sel);
+			if (ok) *ok = YES;
+			return n != 0;
+		}
+		default:
+			return NO;
+	}
+}
+
+static BOOL LxChatMessageFromSelfByObject(id obj, BOOL *known) {
+	if (known) *known = NO;
+	if (!obj) return NO;
+	static NSArray<NSString *> *boolSelectors = nil;
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^{
+		boolSelectors = @[
+			@"isSelf", @"isSelfMsg", @"isSenderSelf", @"isSendBySelf", @"isSendByMe",
+			@"fromSelf", @"isFromSelf", @"isFromMe", @"isMine", @"sendByMe",
+			@"isOutgoing", @"outgoing"
+		];
+	});
+	for (NSString *name in boolSelectors) {
+		BOOL ok = NO;
+		BOOL val = LxReadBoolBySelector(obj, name, &ok);
+		if (!ok) continue;
+		if (known) *known = YES;
+		return val;
+	}
+	return NO;
+}
+
+static BOOL LxChatMessageFromSelf(id cell, id target, BOOL *known) {
+	if (known) *known = NO;
+	BOOL localKnown = NO;
+	BOOL val = LxChatMessageFromSelfByObject(target, &localKnown);
+	if (localKnown) {
+		if (known) *known = YES;
+		return val;
+	}
+
+	id current = target;
+	for (NSInteger i = 0; i < 3 && current; i++) {
+		NSString *unusedSel = nil;
+		current = LxDiagnosticCandidateFromObject(current, &unusedSel);
+		if (!current) break;
+		val = LxChatMessageFromSelfByObject(current, &localKnown);
+		if (localKnown) {
+			if (known) *known = YES;
+			return val;
+		}
+	}
+
+	id model = LxReadObjectIvar(cell, @"msg");
+	val = LxChatMessageFromSelfByObject(model, &localKnown);
+	if (localKnown) {
+		if (known) *known = YES;
+		return val;
+	}
+	return NO;
+}
+
+static void LxCollectBubbleCandidates(UIView *root, UIView *contentView, NSMutableArray<UIView *> *out, NSInteger depth) {
+	if (![root isKindOfClass:[UIView class]] || depth < 0) return;
+	for (UIView *sub in root.subviews) {
+		if (![sub isKindOfClass:[UIView class]]) continue;
+		if (sub.hidden || sub.alpha < 0.05) continue;
+		if (sub.tag == kLxGenericRecalledBadgeTag) continue;
+
+		CGRect rect = [contentView convertRect:sub.bounds fromView:sub];
+		CGFloat w = CGRectGetWidth(rect);
+		CGFloat h = CGRectGetHeight(rect);
+		CGFloat cw = CGRectGetWidth(contentView.bounds);
+		CGFloat ch = CGRectGetHeight(contentView.bounds);
+		BOOL sizeOK = (w >= 44.0 && h >= 20.0 && w <= MAX(cw, 44.0) && h <= MAX(ch, 20.0));
+		BOOL notFullCover = !(w > cw * 0.97 && h > ch * 0.90);
+		if (sizeOK && notFullCover) {
+			[out addObject:sub];
+		}
+
+		if (depth > 0) {
+			LxCollectBubbleCandidates(sub, contentView, out, depth - 1);
+		}
+	}
+}
+
+static CGRect LxChatBubbleAnchorRect(id cell, UIView *contentView, BOOL fromSelfKnown, BOOL fromSelf) {
+	if (![contentView isKindOfClass:[UIView class]]) return contentView.bounds;
+	NSMutableArray<UIView *> *candidates = [NSMutableArray array];
+	LxCollectBubbleCandidates(contentView, contentView, candidates, 2);
+	if (candidates.count == 0) return contentView.bounds;
+
+	CGFloat midX = CGRectGetMidX(contentView.bounds);
+	UIView *best = nil;
+	double bestScore = -DBL_MAX;
+	for (UIView *v in candidates) {
+		CGRect r = [contentView convertRect:v.bounds fromView:v];
+		double score = CGRectGetWidth(r) * CGRectGetHeight(r);
+		NSString *cls = LxClassName(v).lowercaseString;
+		if ([cls containsString:@"bubble"] || [cls containsString:@"content"] || [cls containsString:@"msg"]) {
+			score += 50000.0;
+		}
+		if (CGRectGetWidth(r) > CGRectGetWidth(contentView.bounds) * 0.90) {
+			score -= 20000.0;
+		}
+		if (fromSelfKnown) {
+			double bias = CGRectGetMidX(r) - midX;
+			score += fromSelf ? (bias * 120.0) : (-bias * 120.0);
+		}
+		if (score > bestScore) {
+			bestScore = score;
+			best = v;
+		}
+	}
+
+	if (!best) return contentView.bounds;
+	return [contentView convertRect:best.bounds fromView:best];
+}
+
+__attribute__((unused)) static void LxUpdateGenericCellBadge(id cell, NSString *reason) {
 	if (![cell isKindOfClass:[UIView class]]) return;
 	if (LxIsChatMsgCellObject(cell)) return;
 	if (!LxIsLikelyAppCellClass(cell)) return;
@@ -981,6 +1126,8 @@ static void LxUpdateChatMsgCellBadge(id cell, NSString *reason) {
 	id target = nil;
 	NSString *path = nil;
 	LxChatRecalledState state = LxChatMsgCellRecalledState(cell, &target, &path);
+	BOOL fromSelfKnown = NO;
+	BOOL fromSelf = LxChatMessageFromSelf(cell, target, &fromSelfKnown);
 	UILabel *badge = (UILabel *)[contentView viewWithTag:kLxGenericRecalledBadgeTag];
 	NSNumber *known = objc_getAssociatedObject(cell, kLxChatBadgeKnownRecalledStateKey);
 	BOOL knownRecalled = known.boolValue;
@@ -1023,8 +1170,8 @@ static void LxUpdateChatMsgCellBadge(id cell, NSString *reason) {
 		if (badge) {
 			[badge removeFromSuperview];
 			if (LxShouldLogGenericBadge()) {
-				LxLogLine(@"[LXPATCH] chat badge remove cell=%@ reason=%@ path=%@ negStreak=%ld ageMs=%.1f",
-				          LxClassName(cell), reason ?: @"(nil)", path ?: @"(none)", (long)pendingCount, ageMs);
+				LxLogLine(@"[LXPATCH] chat badge remove cell=%@ ptr=%p reason=%@ path=%@ negStreak=%ld ageMs=%.1f",
+				          LxClassName(cell), cell, reason ?: @"(nil)", path ?: @"(none)", (long)pendingCount, ageMs);
 			}
 		}
 		return;
@@ -1056,11 +1203,19 @@ static void LxUpdateChatMsgCellBadge(id cell, NSString *reason) {
 	[badge sizeToFit];
 	CGFloat badgeW = MAX(58.0, CGRectGetWidth(badge.bounds) + 10.0);
 	CGFloat badgeH = MAX(18.0, CGRectGetHeight(badge.bounds) + 4.0);
-	badge.frame = CGRectMake(8.0, 4.0, badgeW, badgeH);
+	CGRect anchor = LxChatBubbleAnchorRect(cell, contentView, fromSelfKnown, fromSelf);
+	CGFloat contentW = CGRectGetWidth(contentView.bounds);
+	CGFloat x = fromSelf ? (CGRectGetMinX(anchor) + 4.0) : (CGRectGetMaxX(anchor) - badgeW - 4.0);
+	x = MAX(2.0, MIN(contentW - badgeW - 2.0, x));
+	CGFloat y = MAX(2.0, CGRectGetMinY(anchor) + 2.0);
+	badge.frame = CGRectMake(x, y, badgeW, badgeH);
 	if (wasHidden && LxShouldLogGenericBadge()) {
-		LxLogLine(@"[LXPATCH] chat badge show cell=%@ reason=%@ path=%@ target=%@ frame={%.1f,%.1f,%.1f,%.1f}",
+		LxLogLine(@"[LXPATCH] chat badge show cell=%@ ptr=%p reason=%@ side=%@ known=%d path=%@ target=%@ frame={%.1f,%.1f,%.1f,%.1f}",
 		          LxClassName(cell),
+		          cell,
 		          reason ?: @"(nil)",
+		          fromSelf ? @"self" : @"other",
+		          fromSelfKnown ? 1 : 0,
 		          path ?: @"(none)",
 		          LxClassName(target),
 		          badge.frame.origin.x, badge.frame.origin.y, badge.frame.size.width, badge.frame.size.height);
@@ -1094,7 +1249,7 @@ static NSMutableSet *LxRecalledPlainTextSet(void) {
 	return set;
 }
 
-static void LxTrackRecalledPlainText(NSString *text, NSString *source) {
+__attribute__((unused)) static void LxTrackRecalledPlainText(NSString *text, NSString *source) {
 	NSString *plain = LxPlainRecalledTextCandidate(text);
 	if (plain.length == 0 || plain.length > 4096) return;
 	NSMutableSet *set = LxRecalledPlainTextSet();
@@ -1120,14 +1275,14 @@ static BOOL LxIsTrackedRecalledPlainText(NSString *text) {
 	}
 }
 
-static NSString *LxPatchDisplayTextIfNeeded(NSString *text) {
+__attribute__((unused)) static NSString *LxPatchDisplayTextIfNeeded(NSString *text) {
 	if (![text isKindOfClass:[NSString class]]) return text;
 	if ([text hasPrefix:@"[已撤回]"]) return text;
 	if (!LxIsTrackedRecalledPlainText(text)) return text;
 	return LxPrefixedRecalledText(text);
 }
 
-static NSAttributedString *LxPatchDisplayAttributedTextIfNeeded(NSAttributedString *attributedText) {
+__attribute__((unused)) static NSAttributedString *LxPatchDisplayAttributedTextIfNeeded(NSAttributedString *attributedText) {
 	if (![attributedText isKindOfClass:[NSAttributedString class]]) return attributedText;
 	NSString *plain = attributedText.string ?: @"";
 	if (plain.length == 0 || [plain hasPrefix:@"[已撤回]"]) return attributedText;
@@ -1143,7 +1298,7 @@ static NSAttributedString *LxPatchDisplayAttributedTextIfNeeded(NSAttributedStri
 	return merged;
 }
 
-static BOOL LxShouldLogLabelPatch(void) {
+__attribute__((unused)) static BOOL LxShouldLogLabelPatch(void) {
 	static int count = 0;
 	if (count >= 120) return NO;
 	count++;
@@ -1200,7 +1355,7 @@ static NSString *LxTextTypeForObject(id textObj) {
 	return nil;
 }
 
-static BOOL LxPatchBuilderTextLabel(id builder, NSString **outClass, NSString **outType) {
+__attribute__((unused)) static BOOL LxPatchBuilderTextLabel(id builder, NSString **outClass, NSString **outType) {
 	if (outClass) *outClass = nil;
 	if (outType) *outType = nil;
 	if (!builder || ![builder respondsToSelector:@selector(textLabel)]) return NO;
@@ -1210,7 +1365,7 @@ static BOOL LxPatchBuilderTextLabel(id builder, NSString **outClass, NSString **
 	return LxPatchTextLikeObject(label);
 }
 
-static BOOL LxPatchFirstTextLabelInView(UIView *view, NSString **outClass, NSString **outType) {
+__attribute__((unused)) static BOOL LxPatchFirstTextLabelInView(UIView *view, NSString **outClass, NSString **outType) {
 	if (outClass) *outClass = nil;
 	if (outType) *outType = nil;
 	if (![view isKindOfClass:[UIView class]]) return NO;
@@ -1360,39 +1515,6 @@ static void LxUpdateHistoryCellRecalledBadge(id cell, id chatEx, BOOL recalled) 
 	}
 	LxTrackRecalledChatData(content, YES);
 	LxTrackRecalledMessageKeyIfAny(content);
-
-	if ([content isKindOfClass:[NSString class]]) {
-		LxTrackRecalledPlainText((NSString *)content, @"messageContent.string");
-		NSString *patched = LxPrefixedRecalledText((NSString *)content);
-		if (patched != content) {
-			LxLogLine(@"[LXPATCH] messageContent patch string self=%p", self);
-		}
-		return patched;
-	}
-
-	id text = LxObjcMsgSendId(content, @selector(text));
-	if ([text isKindOfClass:[NSString class]]) {
-		LxTrackRecalledPlainText((NSString *)text, [NSString stringWithFormat:@"messageContent.%@.text", LxClassName(content)]);
-		NSString *patched = LxPrefixedRecalledText((NSString *)text);
-		if (patched != text) {
-			LxObjcMsgSendVoidId(content, @selector(setText:), patched);
-			LxLogLine(@"[LXPATCH] messageContent patch content.text self=%p class=%@", self, LxClassName(content));
-		}
-		return content;
-	}
-
-	id textMedia = LxObjcMsgSendId(content, @selector(textMedia));
-	id mediaText = LxObjcMsgSendId(textMedia, @selector(text));
-	if ([mediaText isKindOfClass:[NSString class]]) {
-		LxTrackRecalledPlainText((NSString *)mediaText, @"messageContent.textMedia.text");
-		NSString *patched = LxPrefixedRecalledText((NSString *)mediaText);
-		if (patched != mediaText) {
-			LxObjcMsgSendVoidId(textMedia, @selector(setText:), patched);
-			LxLogLine(@"[LXPATCH] messageContent patch textMedia.text self=%p", self);
-		}
-		return content;
-	}
-
 	return content;
 }
 
@@ -1402,28 +1524,12 @@ static void LxUpdateHistoryCellRecalledBadge(id cell, id chatEx, BOOL recalled) 
 
 - (id)text {
 	id text = %orig;
-	if (![text isKindOfClass:[NSString class]]) return text;
-	if (!LxIsRecalledMessageObject(self)) return text;
-	LxTrackRecalledPlainText((NSString *)text, @"IMTextMessage.text");
-	NSString *patched = LxPrefixedRecalledText((NSString *)text);
-	if (patched != text) {
-		LxObjcMsgSendVoidId(self, @selector(setText:), patched);
-		LxLogLine(@"[LXPATCH] IMTextMessage.text patch self=%p", self);
-	}
-	return patched;
+	return text;
 }
 
 - (id)contentText {
 	id text = %orig;
-	if (![text isKindOfClass:[NSString class]]) return text;
-	if (!LxIsRecalledMessageObject(self)) return text;
-	LxTrackRecalledPlainText((NSString *)text, @"IMTextMessage.contentText");
-	NSString *patched = LxPrefixedRecalledText((NSString *)text);
-	if (patched != text) {
-		LxObjcMsgSendVoidId(self, @selector(setContentText:), patched);
-		LxLogLine(@"[LXPATCH] IMTextMessage.contentText patch self=%p", self);
-	}
-	return patched;
+	return text;
 }
 
 %end
@@ -1431,21 +1537,11 @@ static void LxUpdateHistoryCellRecalledBadge(id cell, id chatEx, BOOL recalled) 
 %hook UILabel
 
 - (void)setText:(NSString *)text {
-	NSString *patched = LxPatchDisplayTextIfNeeded(text);
-	if (patched != text && LxShouldLogLabelPatch()) {
-		LxLogLine(@"[LXPATCH] label text patched class=%@ len=%lu",
-		          LxClassName(self), (unsigned long)text.length);
-	}
-	%orig(patched);
+	%orig(text);
 }
 
 - (void)setAttributedText:(NSAttributedString *)attributedText {
-	NSAttributedString *patched = LxPatchDisplayAttributedTextIfNeeded(attributedText);
-	if (patched != attributedText && LxShouldLogLabelPatch()) {
-		LxLogLine(@"[LXPATCH] label attr patched class=%@ len=%lu",
-		          LxClassName(self), (unsigned long)attributedText.length);
-	}
-	%orig(patched);
+	%orig(attributedText);
 }
 
 %end
@@ -1453,21 +1549,11 @@ static void LxUpdateHistoryCellRecalledBadge(id cell, id chatEx, BOOL recalled) 
 %hook YYLabel
 
 - (void)setText:(NSString *)text {
-	NSString *patched = LxPatchDisplayTextIfNeeded(text);
-	if (patched != text && LxShouldLogLabelPatch()) {
-		LxLogLine(@"[LXPATCH] yylabel text patched class=%@ len=%lu",
-		          LxClassName(self), (unsigned long)text.length);
-	}
-	%orig(patched);
+	%orig(text);
 }
 
 - (void)setAttributedText:(NSAttributedString *)attributedText {
-	NSAttributedString *patched = LxPatchDisplayAttributedTextIfNeeded(attributedText);
-	if (patched != attributedText && LxShouldLogLabelPatch()) {
-		LxLogLine(@"[LXPATCH] yylabel attr patched class=%@ len=%lu",
-		          LxClassName(self), (unsigned long)attributedText.length);
-	}
-	%orig(patched);
+	%orig(attributedText);
 }
 
 %end
@@ -1546,15 +1632,15 @@ static void LxUpdateHistoryCellRecalledBadge(id cell, id chatEx, BOOL recalled) 
 - (void)didMoveToWindow {
 	%orig;
 	if (LxIsChatMsgCellObject(self)) return;
+	if (!LxIsSingleChatViewContext(self)) return;
 	LxDiagnoseCell(self, @"UITableViewCell.didMoveToWindow");
-	LxUpdateGenericCellBadge(self, @"UITableViewCell.didMoveToWindow");
 }
 
 - (void)layoutSubviews {
 	%orig;
 	if (LxIsChatMsgCellObject(self)) return;
+	if (!LxIsSingleChatViewContext(self)) return;
 	LxDiagnoseCell(self, @"UITableViewCell.layoutSubviews");
-	LxUpdateGenericCellBadge(self, @"UITableViewCell.layoutSubviews");
 }
 
 %end
@@ -1563,14 +1649,14 @@ static void LxUpdateHistoryCellRecalledBadge(id cell, id chatEx, BOOL recalled) 
 
 - (void)didMoveToWindow {
 	%orig;
+	if (![self isKindOfClass:[UIView class]] || !LxIsSingleChatViewContext((UIView *)self)) return;
 	LxDiagnoseCell(self, @"UICollectionViewCell.didMoveToWindow");
-	LxUpdateGenericCellBadge(self, @"UICollectionViewCell.didMoveToWindow");
 }
 
 - (void)layoutSubviews {
 	%orig;
+	if (![self isKindOfClass:[UIView class]] || !LxIsSingleChatViewContext((UIView *)self)) return;
 	LxDiagnoseCell(self, @"UICollectionViewCell.layoutSubviews");
-	LxUpdateGenericCellBadge(self, @"UICollectionViewCell.layoutSubviews");
 }
 
 %end
@@ -1659,30 +1745,6 @@ static void LxUpdateHistoryCellRecalledBadge(id cell, id chatEx, BOOL recalled) 
 		recalled = (state == 6 || state == 7);
 	}
 	if (!recalled) return;
-
-	static int enterLogCount = 0;
-	if (enterLogCount < 80) {
-		enterLogCount++;
-		LxLogLine(@"[LXPATCH] updateContent-enter self=%p model=%p modelClass=%@ builderClass=%@",
-		          self, model, LxClassName(model), LxClassName(builder));
-	}
-
-	NSString *candidateClass = nil;
-	NSString *candidateType = nil;
-	BOOL patched = LxPatchBuilderTextLabel(builder, &candidateClass, &candidateType);
-	if (!patched) {
-		UIView *bubbleView = (UIView *)LxObjcMsgSendId(self, @selector(contentView));
-		patched = LxPatchFirstTextLabelInView(bubbleView, &candidateClass, &candidateType);
-	}
-	static int candidateLogCount = 0;
-	if (candidateLogCount < 80) {
-		candidateLogCount++;
-		LxLogLine(@"[LXPATCH] text-candidate class=%@ type=%@ patched=%d",
-		          candidateClass ?: @"(nil)", candidateType ?: @"(nil)", patched ? 1 : 0);
-	}
-	if (patched) {
-		LxLogLine(@"[LXPATCH] updateContent text patched self=%p model=%p builder=%@", self, model, LxClassName(builder));
-	}
 }
 
 %end
