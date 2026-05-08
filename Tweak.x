@@ -21,6 +21,11 @@ static const void *kLxChatBadgePendingCountKey = &kLxChatBadgePendingCountKey;
 static const void *kLxChatBadgeLastPositiveTsKey = &kLxChatBadgeLastPositiveTsKey;
 static const void *kLxChatBadgeLastSourcePathKey = &kLxChatBadgeLastSourcePathKey;
 static const void *kLxChatBadgeVisibleKey = &kLxChatBadgeVisibleKey;
+static const void *kLxChatBadgeLockedSideKnownKey = &kLxChatBadgeLockedSideKnownKey;
+static const void *kLxChatBadgeLockedSideValueKey = &kLxChatBadgeLockedSideValueKey;
+static const void *kLxChatBadgeLastAnchorRectKey = &kLxChatBadgeLastAnchorRectKey;
+static const void *kLxChatBadgeLastFrameKey = &kLxChatBadgeLastFrameKey;
+static const void *kLxChatBadgeLastSideKey = &kLxChatBadgeLastSideKey;
 static NSString *const kLXBuildID = LX_BUILD_ID;
 static NSString *const kLxRecalledBadgeText = @"[撤]";
 
@@ -921,6 +926,13 @@ static BOOL LxShouldLogGenericBadge(void) {
 	return YES;
 }
 
+static BOOL LxShouldLogUnknownSideSkip(void) {
+	static int count = 0;
+	if (count >= 80) return NO;
+	count++;
+	return YES;
+}
+
 static BOOL LxReadBoolBySelector(id obj, NSString *selName, BOOL *ok) {
 	if (ok) *ok = NO;
 	if (!obj || selName.length == 0) return NO;
@@ -1003,6 +1015,20 @@ static BOOL LxChatMessageFromSelf(id cell, id target, BOOL *known) {
 		if (known) *known = YES;
 		return val;
 	}
+
+	static NSArray<NSString *> *cellIvars = nil;
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^{
+		cellIvars = @[@"chatDataWhenTouchBegin", @"chatData", @"templateContent"];
+	});
+	for (NSString *name in cellIvars) {
+		id obj = LxReadObjectIvar(cell, name);
+		val = LxChatMessageFromSelfByObject(obj, &localKnown);
+		if (localKnown) {
+			if (known) *known = YES;
+			return val;
+		}
+	}
 	return NO;
 }
 
@@ -1037,6 +1063,9 @@ static CGRect LxChatBubbleAnchorRect(id cell, UIView *contentView, BOOL fromSelf
 	if (candidates.count == 0) return contentView.bounds;
 
 	CGFloat midX = CGRectGetMidX(contentView.bounds);
+	NSValue *lastAnchorValue = objc_getAssociatedObject(cell, kLxChatBadgeLastAnchorRectKey);
+	CGRect lastAnchor = lastAnchorValue ? [lastAnchorValue CGRectValue] : CGRectZero;
+	BOOL hasLastAnchor = lastAnchorValue != nil;
 	UIView *best = nil;
 	double bestScore = -DBL_MAX;
 	for (UIView *v in candidates) {
@@ -1053,7 +1082,14 @@ static CGRect LxChatBubbleAnchorRect(id cell, UIView *contentView, BOOL fromSelf
 			double bias = CGRectGetMidX(r) - midX;
 			score += fromSelf ? (bias * 120.0) : (-bias * 120.0);
 		}
-		if (score > bestScore) {
+		BOOL better = (score > bestScore + 1.0);
+		if (!better && fabs(score - bestScore) <= 1.0 && hasLastAnchor && best) {
+			CGFloat dNew = fabs(CGRectGetMidX(r) - CGRectGetMidX(lastAnchor)) + fabs(CGRectGetMidY(r) - CGRectGetMidY(lastAnchor));
+			CGRect bestRect = [contentView convertRect:best.bounds fromView:best];
+			CGFloat dOld = fabs(CGRectGetMidX(bestRect) - CGRectGetMidX(lastAnchor)) + fabs(CGRectGetMidY(bestRect) - CGRectGetMidY(lastAnchor));
+			better = (dNew < dOld);
+		}
+		if (better || best == nil) {
 			bestScore = score;
 			best = v;
 		}
@@ -1130,6 +1166,20 @@ static void LxUpdateChatMsgCellBadge(id cell, NSString *reason) {
 	LxChatRecalledState state = LxChatMsgCellRecalledState(cell, &target, &path);
 	BOOL fromSelfKnown = NO;
 	BOOL fromSelf = LxChatMessageFromSelf(cell, target, &fromSelfKnown);
+	NSString *sideSource = @"model";
+	NSNumber *lockedSideKnownNum = objc_getAssociatedObject(cell, kLxChatBadgeLockedSideKnownKey);
+	NSNumber *lockedSideValueNum = objc_getAssociatedObject(cell, kLxChatBadgeLockedSideValueKey);
+	BOOL lockedSideKnown = lockedSideKnownNum.boolValue;
+	if (lockedSideKnown) {
+		fromSelfKnown = YES;
+		fromSelf = lockedSideValueNum.boolValue;
+		sideSource = @"locked";
+	} else if (fromSelfKnown) {
+		objc_setAssociatedObject(cell, kLxChatBadgeLockedSideKnownKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		objc_setAssociatedObject(cell, kLxChatBadgeLockedSideValueKey, @(fromSelf), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		sideSource = @"model";
+	}
+
 	UILabel *badge = (UILabel *)[contentView viewWithTag:kLxGenericRecalledBadgeTag];
 	NSNumber *known = objc_getAssociatedObject(cell, kLxChatBadgeKnownRecalledStateKey);
 	BOOL knownRecalled = known.boolValue;
@@ -1185,7 +1235,36 @@ static void LxUpdateChatMsgCellBadge(id cell, NSString *reason) {
 	objc_setAssociatedObject(cell, kLxChatBadgePendingCountKey, @(0), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 	objc_setAssociatedObject(cell, kLxChatBadgeLastPositiveTsKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 	objc_setAssociatedObject(cell, kLxChatBadgeLastSourcePathKey, path ?: @"(none)", OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-	objc_setAssociatedObject(cell, kLxChatBadgeVisibleKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+	if (!fromSelfKnown) {
+		CGRect guessAnchor = LxChatBubbleAnchorRect(cell, contentView, NO, NO);
+		CGFloat delta = CGRectGetMidX(guessAnchor) - CGRectGetMidX(contentView.bounds);
+		if (fabs(delta) >= 1.0) {
+			fromSelf = (delta > 0);
+			fromSelfKnown = YES;
+			sideSource = @"geometry";
+			objc_setAssociatedObject(cell, kLxChatBadgeLockedSideKnownKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+			objc_setAssociatedObject(cell, kLxChatBadgeLockedSideValueKey, @(fromSelf), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		} else {
+			NSString *lastSide = objc_getAssociatedObject(cell, kLxChatBadgeLastSideKey);
+			if ([lastSide isEqualToString:@"self"] || [lastSide isEqualToString:@"other"]) {
+				fromSelf = [lastSide isEqualToString:@"self"];
+				fromSelfKnown = YES;
+				sideSource = @"last";
+			}
+		}
+		if (!fromSelfKnown && LxShouldLogUnknownSideSkip()) {
+			LxLogLine(@"[LXPATCH] chat badge skip-unknown-side cell=%@ ptr=%p reason=%@ path=%@ target=%@",
+			          LxClassName(cell), cell, reason ?: @"(nil)", path ?: @"(none)", LxClassName(target));
+		}
+		if (!fromSelfKnown && badge) {
+			objc_setAssociatedObject(cell, kLxChatBadgeVisibleKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+			return;
+		}
+	}
+
+	objc_setAssociatedObject(cell, kLxChatBadgeVisibleKey, @(fromSelfKnown), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	if (!fromSelfKnown) return;
 
 	BOOL wasHidden = (badge == nil || !visible || !knownRecalled);
 	if (!badge) {
@@ -1207,37 +1286,41 @@ static void LxUpdateChatMsgCellBadge(id cell, NSString *reason) {
 	CGFloat badgeW = MAX(34.0, CGRectGetWidth(badge.bounds) + 10.0);
 	CGFloat badgeH = MAX(16.0, CGRectGetHeight(badge.bounds) + 4.0);
 	CGRect anchor = LxChatBubbleAnchorRect(cell, contentView, fromSelfKnown, fromSelf);
+	objc_setAssociatedObject(cell, kLxChatBadgeLastAnchorRectKey, [NSValue valueWithCGRect:anchor], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 	CGFloat contentW = CGRectGetWidth(contentView.bounds);
-	CGFloat contentMidX = CGRectGetMidX(contentView.bounds);
-	CGFloat anchorMidX = CGRectGetMidX(anchor);
-	if (!fromSelfKnown && fabs(anchorMidX - contentMidX) >= 1.0) {
-		fromSelf = (anchorMidX > contentMidX);
-		fromSelfKnown = YES;
-		anchor = LxChatBubbleAnchorRect(cell, contentView, fromSelfKnown, fromSelf);
-	}
-
-	BOOL placeOutside = (CGRectGetMinY(anchor) - badgeH - 2.0 >= 1.0);
 	CGFloat x = fromSelf ? (CGRectGetMinX(anchor) + 4.0) : (CGRectGetMaxX(anchor) - badgeW - 4.0);
-	if (placeOutside) {
-		// Place at bubble outer-top corner to avoid covering message text.
-		x = fromSelf ? (CGRectGetMinX(anchor) - badgeW * 0.15) : (CGRectGetMaxX(anchor) - badgeW * 0.85);
-	}
 	x = MAX(2.0, MIN(contentW - badgeW - 2.0, x));
-	CGFloat y = placeOutside ? (CGRectGetMinY(anchor) - badgeH - 2.0) : (CGRectGetMinY(anchor) + 2.0);
+	CGFloat y = MAX(2.0, CGRectGetMinY(anchor) + 4.0);
 	y = MAX(1.0, y);
 	badge.frame = CGRectMake(x, y, badgeW, badgeH);
-	if (wasHidden && LxShouldLogGenericBadge()) {
-		LxLogLine(@"[LXPATCH] chat badge show cell=%@ ptr=%p reason=%@ side=%@ known=%d place=%@ path=%@ target=%@ frame={%.1f,%.1f,%.1f,%.1f}",
+
+	BOOL frameChanged = YES;
+	NSValue *lastFrameValue = objc_getAssociatedObject(cell, kLxChatBadgeLastFrameKey);
+	if (lastFrameValue) {
+		CGRect lastFrame = [lastFrameValue CGRectValue];
+		frameChanged = (fabs(CGRectGetMinX(lastFrame) - x) > 6.0 ||
+		               fabs(CGRectGetMinY(lastFrame) - y) > 6.0 ||
+		               fabs(CGRectGetWidth(lastFrame) - badgeW) > 2.0 ||
+		               fabs(CGRectGetHeight(lastFrame) - badgeH) > 2.0);
+	}
+	NSString *sideStr = fromSelf ? @"self" : @"other";
+	NSString *lastSide = objc_getAssociatedObject(cell, kLxChatBadgeLastSideKey);
+	BOOL sideChanged = ![lastSide isEqualToString:sideStr];
+
+	if ((wasHidden || sideChanged || frameChanged) && LxShouldLogGenericBadge()) {
+		LxLogLine(@"[LXPATCH] chat badge show cell=%@ ptr=%p reason=%@ side=%@ known=%d source=%@ place=inside path=%@ target=%@ frame={%.1f,%.1f,%.1f,%.1f}",
 		          LxClassName(cell),
 		          cell,
 		          reason ?: @"(nil)",
-		          fromSelf ? @"self" : @"other",
-		          fromSelfKnown ? 1 : 0,
-		          placeOutside ? @"outside" : @"inside",
+		          sideStr,
+		          1,
+		          sideSource,
 		          path ?: @"(none)",
 		          LxClassName(target),
 		          badge.frame.origin.x, badge.frame.origin.y, badge.frame.size.width, badge.frame.size.height);
 	}
+	objc_setAssociatedObject(cell, kLxChatBadgeLastFrameKey, [NSValue valueWithCGRect:badge.frame], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	objc_setAssociatedObject(cell, kLxChatBadgeLastSideKey, sideStr, OBJC_ASSOCIATION_COPY_NONATOMIC);
 }
 
 static NSString *LxPrefixedRecalledText(NSString *text) {
@@ -1642,6 +1725,11 @@ static void LxUpdateHistoryCellRecalledBadge(id cell, id chatEx, BOOL recalled) 
 	objc_setAssociatedObject(self, kLxChatBadgeLastPositiveTsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 	objc_setAssociatedObject(self, kLxChatBadgeLastSourcePathKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 	objc_setAssociatedObject(self, kLxChatBadgeVisibleKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	objc_setAssociatedObject(self, kLxChatBadgeLockedSideKnownKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	objc_setAssociatedObject(self, kLxChatBadgeLockedSideValueKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	objc_setAssociatedObject(self, kLxChatBadgeLastAnchorRectKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	objc_setAssociatedObject(self, kLxChatBadgeLastFrameKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	objc_setAssociatedObject(self, kLxChatBadgeLastSideKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 %end
