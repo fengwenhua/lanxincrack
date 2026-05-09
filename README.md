@@ -12,7 +12,7 @@
 4. 开屏页跳过（每次打开都有广告，受不了）。
 5. 背景水印去除
 
-<img width="345" height="688" alt="image" src="https://github.com/user-attachments/assets/f5cecfdf-a5a9-421a-81ad-d9413a064733" />
+<img width="333" height="598" alt="image" src="https://github.com/user-attachments/assets/54091432-3939-4cf4-8860-0ffd8e531022" />
 
 
 ## 目录说明
