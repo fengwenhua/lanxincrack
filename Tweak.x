@@ -14,7 +14,6 @@ static NSString *const kLXBuildID = LX_BUILD_ID;
 static const void *kLxRecalledFlagKey = &kLxRecalledFlagKey;
 static const NSInteger kLxRecallIconTag = 0x4C585249; // LXRI
 static int gLxRecallIconLogCount = 0;
-static int gLxMessageCtxLogCount = 0;
 static void LxLogLine(NSString *format, ...);
 
 static void LxMarkMessageRecalled(id message) {
@@ -173,29 +172,6 @@ static BOOL LxIsRecalledContext(id obj) {
     return NO;
 }
 
-static BOOL LxIsOutgoingContext(id obj) {
-    if (!obj) return NO;
-    SEL boolSels[] = {
-        @selector(isSendBySelf),
-        @selector(isSenderSelf),
-        @selector(isSelfSend),
-        @selector(isMySelf),
-        @selector(isFromSelf),
-        @selector(outgoing),
-        @selector(isOutgoing)
-    };
-    for (size_t i = 0; i < sizeof(boolSels) / sizeof(boolSels[0]); i++) {
-        if (LxObjcMsgSendBool(obj, boolSels[i])) return YES;
-    }
-    id core = LxExtractCoreMessage(obj);
-    if (core && core != obj) {
-        for (size_t i = 0; i < sizeof(boolSels) / sizeof(boolSels[0]); i++) {
-            if (LxObjcMsgSendBool(core, boolSels[i])) return YES;
-        }
-    }
-    return NO;
-}
-
 static id LxMessageContextFromCell(id cell) {
     if (!cell) return nil;
     SEL sels[] = {
@@ -220,11 +196,6 @@ static id LxMessageContextFromCell(id cell) {
     NSMutableSet<NSValue *> *visited = [NSMutableSet setWithCapacity:24];
     id scanHit = LxFindContextByScan(cell, 2, visited);
     if (scanHit) return scanHit;
-
-    if (gLxMessageCtxLogCount < 80) {
-        gLxMessageCtxLogCount++;
-        LxLogLine(@"[LXPATCH] ctx-miss class=%@", NSStringFromClass([cell class]) ?: @"(nil)");
-    }
     return nil;
 }
 
@@ -264,7 +235,6 @@ static UIView *LxFindBubbleContainer(id cell) {
         @selector(msgBackView),
         @selector(contentBgView),
         @selector(contentContainerView),
-        @selector(contentView),
         @selector(bubbleView),
         @selector(bodyView),
         @selector(textContentView)
@@ -274,94 +244,53 @@ static UIView *LxFindBubbleContainer(id cell) {
         if (v && CGRectGetWidth(v.bounds) > 40 && CGRectGetHeight(v.bounds) > 20) return v;
     }
     if ([cell isKindOfClass:[UITableViewCell class]]) {
-        return ((UITableViewCell *)cell).contentView;
-    }
-    return [cell isKindOfClass:[UIView class]] ? (UIView *)cell : nil;
-}
-
-static UIView *LxFindReactionHost(UIView *bubble) {
-    if (!bubble) return nil;
-    NSMutableArray<UIView *> *subs = [NSMutableArray array];
-    LxCollectSubviews(bubble, subs);
-    for (UIView *v in subs) {
-        NSString *cn = NSStringFromClass([v class]).lowercaseString ?: @"";
-        if (cn.length == 0) continue;
-        if ([cn containsString:@"reply"] || [cn containsString:@"reaction"] || [cn containsString:@"emoji"] || [cn containsString:@"emoticon"]) {
-            if (!v.hidden && v.alpha > 0.01) return v.superview ?: v;
+        UIView *content = ((UITableViewCell *)cell).contentView;
+        if (content) {
+            NSMutableArray<UIView *> *subs = [NSMutableArray array];
+            LxCollectSubviews(content, subs);
+            UIView *best = nil;
+            CGFloat bestArea = 0;
+            CGFloat contentW = CGRectGetWidth(content.bounds);
+            for (UIView *v in subs) {
+                if (v.hidden || v.alpha < 0.01) continue;
+                CGRect rf = [content convertRect:v.bounds fromView:v];
+                CGFloat w = CGRectGetWidth(rf);
+                CGFloat h = CGRectGetHeight(rf);
+                if (w < 60.0 || h < 20.0) continue;
+                if (contentW > 0 && w > contentW - 14.0) continue;
+                CGFloat area = w * h;
+                if (area > bestArea) {
+                    best = v;
+                    bestArea = area;
+                }
+            }
+            if (best) return best;
         }
     }
     return nil;
 }
 
-static BOOL LxFindReactionSeedFrame(UIView *host, CGRect *outFrame) {
-    if (!host || !outFrame) return NO;
-    NSMutableArray<UIView *> *subs = [NSMutableArray array];
-    LxCollectSubviews(host, subs);
-    for (UIView *v in subs) {
-        if (![v isKindOfClass:[UIImageView class]]) continue;
-        if (v.hidden || v.alpha < 0.01) continue;
-        CGRect rf = [host convertRect:v.bounds fromView:v];
-        CGFloat w = CGRectGetWidth(rf);
-        CGFloat h = CGRectGetHeight(rf);
-        if (w >= 12 && h >= 12 && w <= 42 && h <= 42 && CGRectGetMinY(rf) >= CGRectGetHeight(host.bounds) * 0.35) {
-            *outFrame = rf;
-            return YES;
-        }
-    }
-    return NO;
-}
-
-static NSMutableSet<NSString *> *LxDiscoveredCellClasses(void) {
-    static NSMutableSet<NSString *> *set = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        set = [NSMutableSet set];
-    });
-    return set;
-}
-
-static BOOL LxShouldProcessMessageCell(UITableViewCell *cell, BOOL *outHasContext) {
+static BOOL LxIsChatMsgCell(id cell) {
     if (!cell) return NO;
-    id ctx = LxMessageContextFromCell(cell);
-    BOOL hasContext = (ctx != nil);
-    if (outHasContext) *outHasContext = hasContext;
-    if (hasContext) return YES;
-
     NSString *cls = NSStringFromClass([cell class]).lowercaseString ?: @"";
     if (cls.length == 0) return NO;
-    if ([cls containsString:@"chatmsg"] || [cls containsString:@"messagecell"] || [cls containsString:@"msgcell"]) return YES;
-    if ([cls containsString:@"chat"] && [cls containsString:@"cell"]) return YES;
-    if ([cls containsString:@"aurora"] && [cls containsString:@"message"]) return YES;
-    return NO;
-}
-
-static void LxLogCellDiscoveryIfNeeded(UITableViewCell *cell, BOOL hasContext, NSString *reason) {
-    NSString *cls = NSStringFromClass([cell class]) ?: @"(nil)";
-    NSMutableSet<NSString *> *set = LxDiscoveredCellClasses();
-    BOOL shouldLog = NO;
-    @synchronized (set) {
-        if (![set containsObject:cls]) {
-            [set addObject:cls];
-            shouldLog = YES;
-        }
-    }
-    if (shouldLog) {
-        LxLogLine(@"[LXPATCH] cell-discovery class=%@ hasMessageCtx=%d reason=%@", cls, hasContext ? 1 : 0, reason ?: @"(nil)");
-    }
+    return [cls isEqualToString:@"lxchatmsgcell"] || [cls containsString:@"lxchatmsgcell"];
 }
 
 static void LxApplyRecallIconToCell(id cell, NSString *reason) {
     if (![cell isKindOfClass:[UIView class]]) return;
+    if (!LxIsChatMsgCell(cell)) return;
     UIView *cellView = (UIView *)cell;
     UIImageView *iconView = (UIImageView *)[cellView viewWithTag:kLxRecallIconTag];
     id msgContext = LxMessageContextFromCell(cell);
     BOOL recalled = LxIsRecalledContext(msgContext);
     if (!recalled) {
         if (iconView) {
+            BOOL wasVisible = !iconView.hidden;
             iconView.hidden = YES;
-            if (gLxRecallIconLogCount < 200) {
+            if (wasVisible && gLxRecallIconLogCount < 160) {
                 gLxRecallIconLogCount++;
-                LxLogLine(@"[LXPATCH] recall icon remove cell=%@ ptr=%p reason=%@", NSStringFromClass([cell class]), cell, reason ?: @"(nil)");
+                LxLogLine(@"[LXPATCH] recall icon hide cell=%@ ptr=%p reason=%@", NSStringFromClass([cell class]), cell, reason ?: @"(nil)");
             }
         }
         return;
@@ -369,34 +298,37 @@ static void LxApplyRecallIconToCell(id cell, NSString *reason) {
 
     UIImage *iconImage = LxRecallIconImage();
     if (!iconImage) {
-        if (gLxRecallIconLogCount < 200) {
+        if (gLxRecallIconLogCount < 160) {
             gLxRecallIconLogCount++;
-            LxLogLine(@"[LXPATCH] recall icon skip-no-image cell=%@ ptr=%p reason=%@", NSStringFromClass([cell class]), cell, reason ?: @"(nil)");
+            LxLogLine(@"[LXPATCH] recall icon error=no-image cell=%@ ptr=%p reason=%@",
+                      NSStringFromClass([cell class]), cell, reason ?: @"(nil)");
         }
         return;
     }
 
     UIView *bubble = LxFindBubbleContainer(cell);
-    if (!bubble) return;
-    UIView *host = LxFindReactionHost(bubble) ?: bubble;
-    CGRect target = CGRectZero;
-    if (LxFindReactionSeedFrame(host, &target)) {
-        if (gLxRecallIconLogCount < 200) {
+    if (!bubble) {
+        if (gLxRecallIconLogCount < 160) {
             gLxRecallIconLogCount++;
-            LxLogLine(@"[LXPATCH] recall icon apply cell=%@ ptr=%p reason=%@ host=%@ mode=container",
-                      NSStringFromClass([cell class]), cell, reason ?: @"(nil)", NSStringFromClass([host class]));
+            LxLogLine(@"[LXPATCH] recall icon error=no-bubble cell=%@ ptr=%p reason=%@",
+                      NSStringFromClass([cell class]), cell, reason ?: @"(nil)");
         }
-    } else {
-        BOOL outgoing = LxIsOutgoingContext(msgContext) || LxIsOutgoingContext(cell);
-        CGFloat size = 18.0;
-        CGFloat x = outgoing ? (CGRectGetWidth(host.bounds) - size - 6.0) : 6.0;
-        CGFloat y = MAX(2.0, CGRectGetHeight(host.bounds) - size - 4.0);
-        target = CGRectMake(x, y, size, size);
-        if (gLxRecallIconLogCount < 200) {
-            gLxRecallIconLogCount++;
-            LxLogLine(@"[LXPATCH] recall icon apply cell=%@ ptr=%p reason=%@ side=%@ mode=fallback",
-                      NSStringFromClass([cell class]), cell, reason ?: @"(nil)", outgoing ? @"self" : @"other");
-        }
+        return;
+    }
+    CGFloat bw = CGRectGetWidth(bubble.bounds);
+    CGFloat bh = CGRectGetHeight(bubble.bounds);
+    if (bw < 20.0 || bh < 12.0) return;
+
+    UIView *host = bubble;
+    CGFloat size = 16.0;
+    CGFloat insetX = 3.0;
+    CGFloat insetY = 2.0;
+    CGFloat x = MAX(0.0, bw - size - insetX);
+    CGFloat y = insetY;
+    CGRect target = CGRectIntegral(CGRectMake(x, y, size, size));
+
+    if (target.origin.x + target.size.width > bw) {
+        target.origin.x = MAX(0.0, bw - target.size.width);
     }
 
     if (!iconView) {
@@ -411,24 +343,26 @@ static void LxApplyRecallIconToCell(id cell, NSString *reason) {
     }
     iconView.frame = target;
     iconView.hidden = NO;
+    if (gLxRecallIconLogCount < 160) {
+        gLxRecallIconLogCount++;
+        LxLogLine(@"[LXPATCH] recall icon show cell=%@ ptr=%p reason=%@ frame={%.1f,%.1f,%.1f,%.1f}",
+                  NSStringFromClass([cell class]),
+                  cell,
+                  reason ?: @"(nil)",
+                  target.origin.x, target.origin.y, target.size.width, target.size.height);
+    }
 }
 
-%hook UITableViewCell
+%hook LxChatMsgCell
 
 - (void)didMoveToWindow {
     %orig;
-    BOOL hasContext = NO;
-    if (!LxShouldProcessMessageCell(self, &hasContext)) return;
-    LxLogCellDiscoveryIfNeeded(self, hasContext, @"UITableViewCell.didMoveToWindow");
-    LxApplyRecallIconToCell(self, @"UITableViewCell.didMoveToWindow");
+    LxApplyRecallIconToCell(self, @"LxChatMsgCell.didMoveToWindow");
 }
 
 - (void)layoutSubviews {
     %orig;
-    BOOL hasContext = NO;
-    if (!LxShouldProcessMessageCell(self, &hasContext)) return;
-    LxLogCellDiscoveryIfNeeded(self, hasContext, @"UITableViewCell.layoutSubviews");
-    LxApplyRecallIconToCell(self, @"UITableViewCell.layoutSubviews");
+    LxApplyRecallIconToCell(self, @"LxChatMsgCell.layoutSubviews");
 }
 
 %end
