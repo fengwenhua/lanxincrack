@@ -67,10 +67,13 @@ static void LxLogLine(NSString *format, ...) {
 }
 
 static NSString *const kLXRecalledMessageKeysDefaultsKey = @"lanxincrack.recalledMessageKeys.v1";
-static const int kLXEmoteTypeMarker = 2; // Observed in logs as TYPE_OK; use a known valid marker first.
+static NSString *const kLXLearnedEmoteTypeDoubtDefaultsKey = @"lanxincrack.emoteType.doubt.v1";
+static NSString *const kLXVerboseEmoteLoggingDefaultsKey = @"lanxincrack.emoteVerboseLogging.v1";
+static const int kLXEmoteTypeDoubtDefault = 4;
 static char kLXRecalledAssociatedKey;
 static char kLXSyntheticEmoteListAssociatedKey;
 static __strong NSMutableSet<NSString *> *gLXRecalledMessageKeys = nil;
+static __strong NSMutableDictionary<NSString *, id> *gLXSyntheticEmoteListsByMessageKey = nil;
 static __strong id gLXEmoteReplySampleList = nil;
 static __strong id gLXEmoteReplySampleItem = nil;
 static __strong NSMutableSet<NSString *> *gLXDiagnosedEmoteListClasses = nil;
@@ -85,7 +88,12 @@ static void LxEnsureEmoteRuntimeSets(void) {
         gLXDiagnosedEmoteItemClasses = [NSMutableSet set];
         gLXProbedEmoteListClasses = [NSMutableSet set];
         gLXLoggedSyntheticFailures = [NSMutableSet set];
+        gLXSyntheticEmoteListsByMessageKey = [NSMutableDictionary dictionary];
     });
+}
+
+static BOOL LxVerboseEmoteLoggingEnabled(void) {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:kLXVerboseEmoteLoggingDefaultsKey];
 }
 
 static NSString *LxTrimmedDescription(id value) {
@@ -195,6 +203,32 @@ static NSString *LxSelectorDescription(id object, NSString *selectorName) {
     return nil;
 }
 
+static int LxCurrentMarkerEmoteType(void) {
+    NSInteger learned = [[NSUserDefaults standardUserDefaults] integerForKey:kLXLearnedEmoteTypeDoubtDefaultsKey];
+    if (learned > 0 && learned <= INT_MAX) return (int)learned;
+    return kLXEmoteTypeDoubtDefault;
+}
+
+static void LxLearnDoubtEmoteTypeFromItem(id item) {
+    if (!item) return;
+    id emoteReplyId = LxObjectResult(item, @"emoteReplyId");
+    NSString *itemDesc = [[LxTrimmedDescription(item) ?: @"" uppercaseString] copy];
+    NSString *replyIdDesc = [[LxTrimmedDescription(emoteReplyId) ?: @"" uppercaseString] copy];
+    if (![itemDesc containsString:@"TYPE_DOUBT"] && ![replyIdDesc containsString:@"TYPE_DOUBT"]) return;
+
+    long long emoteType = LLONG_MIN;
+    if (!LxIntegerResult(item, @"emoteType", &emoteType) &&
+        !LxIntegerResult(emoteReplyId, @"emoteType", &emoteType)) {
+        return;
+    }
+    if (emoteType <= 0 || emoteType > INT_MAX) return;
+
+    NSInteger previous = [[NSUserDefaults standardUserDefaults] integerForKey:kLXLearnedEmoteTypeDoubtDefaultsKey];
+    if (previous == (NSInteger)emoteType) return;
+    [[NSUserDefaults standardUserDefaults] setInteger:(NSInteger)emoteType forKey:kLXLearnedEmoteTypeDoubtDefaultsKey];
+    LxLogLine(@"[LXEMOTE] learned TYPE_DOUBT emoteType=%lld", emoteType);
+}
+
 static BOOL LxObjectLooksLikeClass(id object, NSString *classNamePart) {
     if (!object || classNamePart.length == 0) return NO;
     NSString *className = NSStringFromClass([object class]) ?: @"";
@@ -288,6 +322,33 @@ static BOOL LxIsRecalledMessage(id message) {
     if (key.length == 0) return NO;
     @synchronized (LxRecalledMessageKeys()) {
         return [LxRecalledMessageKeys() containsObject:key];
+    }
+}
+
+static id LxCachedSyntheticEmoteListForMessage(id message) {
+    NSString *key = LxMessageStableKey(message);
+    if (key.length == 0) return nil;
+    LxEnsureEmoteRuntimeSets();
+    @synchronized (gLXSyntheticEmoteListsByMessageKey) {
+        return gLXSyntheticEmoteListsByMessageKey[key];
+    }
+}
+
+static void LxCacheSyntheticEmoteListForMessage(id message, id list) {
+    NSString *key = LxMessageStableKey(message);
+    if (key.length == 0 || !list) return;
+    LxEnsureEmoteRuntimeSets();
+    @synchronized (gLXSyntheticEmoteListsByMessageKey) {
+        gLXSyntheticEmoteListsByMessageKey[key] = list;
+    }
+}
+
+static void LxClearSyntheticEmoteListForMessage(id message) {
+    NSString *key = LxMessageStableKey(message);
+    if (key.length == 0) return;
+    LxEnsureEmoteRuntimeSets();
+    @synchronized (gLXSyntheticEmoteListsByMessageKey) {
+        [gLXSyntheticEmoteListsByMessageKey removeObjectForKey:key];
     }
 }
 
@@ -428,7 +489,7 @@ static BOOL LxEmoteListAddItem(id list, id item) {
 }
 
 static void LxLogEmoteSelectorProbe(id list, NSString *source) {
-    if (!list) return;
+    if (!list || !LxVerboseEmoteLoggingEnabled()) return;
     LxEnsureEmoteRuntimeSets();
     NSString *className = NSStringFromClass([list class]) ?: @"(nil)";
     @synchronized (gLXProbedEmoteListClasses) {
@@ -461,7 +522,7 @@ static void LxLogEmoteSelectorProbe(id list, NSString *source) {
 }
 
 static void LxLogInterestingMethods(id object, NSString *tag, NSMutableSet<NSString *> *seenClasses) {
-    if (!object || !seenClasses) return;
+    if (!object || !seenClasses || !LxVerboseEmoteLoggingEnabled()) return;
     NSString *className = NSStringFromClass([object class]) ?: @"(nil)";
     @synchronized (seenClasses) {
         if ([seenClasses containsObject:className]) return;
@@ -497,7 +558,7 @@ static void LxLogInterestingMethods(id object, NSString *tag, NSMutableSet<NSStr
 }
 
 static void LxDiagnoseEmoteReplyList(id list, NSString *source) {
-    if (!list) return;
+    if (!list || !LxVerboseEmoteLoggingEnabled()) return;
     LxEnsureEmoteRuntimeSets();
 
     NSUInteger count = LxEmoteItemCount(list);
@@ -514,16 +575,17 @@ static void LxDiagnoseEmoteReplyList(id list, NSString *source) {
     }
 }
 
-static BOOL LxListHasDoubtEmote(id list) {
+static BOOL LxListHasMarkerEmote(id list) {
+    int markerType = LxCurrentMarkerEmoteType();
     NSUInteger count = LxEmoteItemCount(list);
     for (NSUInteger i = 0; i < count; i++) {
         id item = LxEmoteItemAtIndex(list, i);
         long long emoteType = LLONG_MIN;
-        if (LxIntegerResult(item, @"emoteType", &emoteType) && emoteType == kLXEmoteTypeMarker) {
+        if (LxIntegerResult(item, @"emoteType", &emoteType) && emoteType == markerType) {
             return YES;
         }
         id emoteReplyId = LxObjectResult(item, @"emoteReplyId");
-        if (LxIntegerResult(emoteReplyId, @"emoteType", &emoteType) && emoteType == kLXEmoteTypeMarker) {
+        if (LxIntegerResult(emoteReplyId, @"emoteType", &emoteType) && emoteType == markerType) {
             return YES;
         }
         NSString *desc = LxSelectorDescription(item, @"emoteType");
@@ -547,10 +609,13 @@ static void LxRememberEmoteReplySample(id list) {
     id listCopy = LxCopyLikeObject(list);
     gLXEmoteReplySampleItem = itemCopy ?: firstItem;
     gLXEmoteReplySampleList = listCopy ?: list;
-    LxLogLine(@"[LXEMOTE] cached sample listClass=%@ itemClass=%@ itemType=%@",
-              NSStringFromClass([list class]),
-              NSStringFromClass([firstItem class]),
-        LxSelectorDescription(firstItem, @"emoteType") ?: LxSelectorDescription(LxObjectResult(firstItem, @"emoteReplyId"), @"emoteType"));
+    LxLearnDoubtEmoteTypeFromItem(firstItem);
+    if (LxVerboseEmoteLoggingEnabled()) {
+        LxLogLine(@"[LXEMOTE] cached sample listClass=%@ itemClass=%@ itemType=%@",
+                  NSStringFromClass([list class]),
+                  NSStringFromClass([firstItem class]),
+            LxSelectorDescription(firstItem, @"emoteType") ?: LxSelectorDescription(LxObjectResult(firstItem, @"emoteReplyId"), @"emoteType"));
+    }
 }
 
 static id LxSyntheticDoubtEmoteItem(id message, id list) {
@@ -598,9 +663,10 @@ static id LxSyntheticDoubtEmoteItem(id message, id list) {
     }
 
     BOOL didSetType = NO;
-    didSetType |= LxSetIntegerValue(replyId, @"setEmoteType:", kLXEmoteTypeMarker);
-    didSetType |= LxSetIntegerValue(replyId, @"setEmoteTypeValue:", kLXEmoteTypeMarker);
-    didSetType |= LxSetIntegerValue(replyId, @"setType:", kLXEmoteTypeMarker);
+    int markerType = LxCurrentMarkerEmoteType();
+    didSetType |= LxSetIntegerValue(replyId, @"setEmoteType:", markerType);
+    didSetType |= LxSetIntegerValue(replyId, @"setEmoteTypeValue:", markerType);
+    didSetType |= LxSetIntegerValue(replyId, @"setType:", markerType);
 
     if (!didSetType) {
         LxLogLine(@"[LXEMOTE] skip synthetic: nested emoteType setter missing key=%@ replyIdClass=%@ desc=%@",
@@ -616,11 +682,13 @@ static id LxSyntheticDoubtEmoteItem(id message, id list) {
                   NSStringFromClass([item class]));
         return nil;
     }
-    LxLogLine(@"[LXEMOTE] set nested marker emoteType=%d key=%@ itemClass=%@ replyIdClass=%@",
-              kLXEmoteTypeMarker,
-              LxMessageStableKey(message),
-              NSStringFromClass([item class]),
-              NSStringFromClass([replyId class]));
+    if (LxVerboseEmoteLoggingEnabled()) {
+        LxLogLine(@"[LXEMOTE] set nested marker emoteType=%d key=%@ itemClass=%@ replyIdClass=%@",
+                  markerType,
+                  LxMessageStableKey(message),
+                  NSStringFromClass([item class]),
+                  NSStringFromClass([replyId class]));
+    }
     return item;
 }
 
@@ -647,7 +715,10 @@ static id LxSyntheticListFromSample(id syntheticItem) {
 static id LxAugmentedEmoteReplyInfoList(id message, id originalList) {
     if (!LxIsRecalledMessage(message)) return originalList;
     if (originalList) LxDiagnoseEmoteReplyList(originalList, @"getter-recalled");
-    if (originalList && LxListHasDoubtEmote(originalList)) return originalList;
+    if (originalList && LxListHasMarkerEmote(originalList)) return originalList;
+
+    id cachedList = LxCachedSyntheticEmoteListForMessage(message);
+    if (cachedList) return cachedList;
 
     id syntheticItem = LxSyntheticDoubtEmoteItem(message, originalList);
     if (!syntheticItem) {
@@ -668,10 +739,13 @@ static id LxAugmentedEmoteReplyInfoList(id message, id originalList) {
     if ([originalList isKindOfClass:[NSArray class]]) {
         NSMutableArray *array = [(NSArray *)originalList mutableCopy] ?: [NSMutableArray array];
         [array addObject:syntheticItem];
-        LxLogLine(@"[LXEMOTE] appended synthetic doubt to NSArray key=%@ count=%lu",
-                  LxMessageStableKey(message),
-                  (unsigned long)array.count);
+        if (LxVerboseEmoteLoggingEnabled()) {
+            LxLogLine(@"[LXEMOTE] appended synthetic marker to NSArray key=%@ count=%lu",
+                      LxMessageStableKey(message),
+                      (unsigned long)array.count);
+        }
         objc_setAssociatedObject(array, &kLXSyntheticEmoteListAssociatedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        LxCacheSyntheticEmoteListForMessage(message, array);
         return array;
     }
 
@@ -679,10 +753,13 @@ static id LxAugmentedEmoteReplyInfoList(id message, id originalList) {
         id listCopy = LxCopyLikeObject(originalList);
         if (listCopy) {
             if (LxEmoteListAddItem(listCopy, syntheticItem)) {
-                LxLogLine(@"[LXEMOTE] appended synthetic doubt to copied list key=%@ listClass=%@",
-                          LxMessageStableKey(message),
-                          NSStringFromClass([listCopy class]));
+                if (LxVerboseEmoteLoggingEnabled()) {
+                    LxLogLine(@"[LXEMOTE] appended synthetic marker to copied list key=%@ listClass=%@",
+                              LxMessageStableKey(message),
+                              NSStringFromClass([listCopy class]));
+                }
                 objc_setAssociatedObject(listCopy, &kLXSyntheticEmoteListAssociatedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                LxCacheSyntheticEmoteListForMessage(message, listCopy);
                 return listCopy;
             }
 
@@ -696,21 +773,27 @@ static id LxAugmentedEmoteReplyInfoList(id message, id originalList) {
             if (LxSetObjectValue(listCopy, @"setEmoteReplyInfoS:", newItems) ||
                 LxSetObjectValue(listCopy, @"setEmoteReplyInfos:", newItems) ||
                 LxSetObjectValue(listCopy, @"setEmoteReplyInfoArray:", newItems)) {
-                LxLogLine(@"[LXEMOTE] rebuilt synthetic doubt list key=%@ listClass=%@ count=%lu",
-                          LxMessageStableKey(message),
-                          NSStringFromClass([listCopy class]),
-                          (unsigned long)newItems.count);
+                if (LxVerboseEmoteLoggingEnabled()) {
+                    LxLogLine(@"[LXEMOTE] rebuilt synthetic marker list key=%@ listClass=%@ count=%lu",
+                              LxMessageStableKey(message),
+                              NSStringFromClass([listCopy class]),
+                              (unsigned long)newItems.count);
+                }
                 objc_setAssociatedObject(listCopy, &kLXSyntheticEmoteListAssociatedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                LxCacheSyntheticEmoteListForMessage(message, listCopy);
                 return listCopy;
             }
         }
     }
     id sampleList = LxSyntheticListFromSample(syntheticItem);
     if (sampleList) {
-        LxLogLine(@"[LXEMOTE] built synthetic marker list from sample key=%@ listClass=%@",
-                  LxMessageStableKey(message),
-                  NSStringFromClass([sampleList class]));
+        if (LxVerboseEmoteLoggingEnabled()) {
+            LxLogLine(@"[LXEMOTE] built synthetic marker list from sample key=%@ listClass=%@",
+                      LxMessageStableKey(message),
+                      NSStringFromClass([sampleList class]));
+        }
         objc_setAssociatedObject(sampleList, &kLXSyntheticEmoteListAssociatedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        LxCacheSyntheticEmoteListForMessage(message, sampleList);
         return sampleList;
     }
     return originalList;
@@ -768,6 +851,7 @@ static id LxAugmentedEmoteReplyInfoList(id message, id originalList) {
         %orig(list);
         return;
     }
+    LxClearSyntheticEmoteListForMessage(self);
     if (list && LxEmoteItemCount(list) > 0) {
         LxDiagnoseEmoteReplyList(list, @"setter");
         LxRememberEmoteReplySample(list);
