@@ -68,3 +68,10 @@ fallback=/private/var/mobile/Containers/Data/Application/F9355858-C5A0-4A2C-9E67
 ```bash
 tail -n 2000 /var/mobile/Containers/Data/Application/F9355858-C5A0-4A2C-9E67-88BDDA464A1B/Library/Caches/lanxincrack.20260508233555.log | grep -E "\[LXBUILD\]|chat badge|setMsgState remap|IMTextMessage.text patch|recalled="
 ```
+
+
+我结合在一起：
+
+```bash
+tail -n 2000 /var/mobile/Containers/Data/Application/F9355858-C5A0-4A2C-9E67-88BDDA464A1B/Library/Caches/lanxincrack.$(head -n1 /var/mobile/Containers/Data/Application/F9355858-C5A0-4A2C-9E67-88BDDA464A1B/Library/Caches/lanxincrack.buildid).log
+```
