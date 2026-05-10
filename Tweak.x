@@ -68,7 +68,7 @@ static void LxLogLine(NSString *format, ...) {
 
 static NSString *const kLXRecalledMessageKeysDefaultsKey = @"lanxincrack.recalledMessageKeys.v1";
 static NSString *const kLXLearnedEmoteTypeDoubtDefaultsKey = @"lanxincrack.emoteType.doubt.v1";
-static NSString *const kLXVerboseEmoteLoggingDefaultsKey = @"lanxincrack.emoteVerboseLogging.v1";
+// Runtime logs showed TYPE_DOUBT is 6. Keep learning support in case the app changes this enum.
 static const int kLXEmoteTypeDoubtDefault = 6;
 static char kLXRecalledAssociatedKey;
 static char kLXSyntheticEmoteListAssociatedKey;
@@ -77,24 +77,14 @@ static __strong NSMutableDictionary<NSString *, id> *gLXSyntheticEmoteListsByMes
 static int gLXSyntheticEmoteCacheMarkerType = 0;
 static __strong id gLXEmoteReplySampleList = nil;
 static __strong id gLXEmoteReplySampleItem = nil;
-static __strong NSMutableSet<NSString *> *gLXDiagnosedEmoteListClasses = nil;
-static __strong NSMutableSet<NSString *> *gLXDiagnosedEmoteItemClasses = nil;
-static __strong NSMutableSet<NSString *> *gLXProbedEmoteListClasses = nil;
 static __strong NSMutableSet<NSString *> *gLXLoggedSyntheticFailures = nil;
 
 static void LxEnsureEmoteRuntimeSets(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        gLXDiagnosedEmoteListClasses = [NSMutableSet set];
-        gLXDiagnosedEmoteItemClasses = [NSMutableSet set];
-        gLXProbedEmoteListClasses = [NSMutableSet set];
         gLXLoggedSyntheticFailures = [NSMutableSet set];
         gLXSyntheticEmoteListsByMessageKey = [NSMutableDictionary dictionary];
     });
-}
-
-static BOOL LxVerboseEmoteLoggingEnabled(void) {
-    return [[NSUserDefaults standardUserDefaults] boolForKey:kLXVerboseEmoteLoggingDefaultsKey];
 }
 
 static void LxClearAllSyntheticEmoteLists(void) {
@@ -104,6 +94,8 @@ static void LxClearAllSyntheticEmoteLists(void) {
     }
 }
 
+// These helpers call unknown app/protobuf accessors defensively. Many Lanxin
+// message classes are private and may not expose stable Objective-C headers.
 static NSString *LxTrimmedDescription(id value) {
     if (!value) return nil;
     NSString *desc = nil;
@@ -200,23 +192,15 @@ static id LxCopyLikeObject(id object) {
     return nil;
 }
 
-static NSString *LxSelectorDescription(id object, NSString *selectorName) {
-    id objectValue = LxObjectResult(object, selectorName);
-    if (objectValue) return LxTrimmedDescription(objectValue);
-
-    long long intValue = 0;
-    if (LxIntegerResult(object, selectorName, &intValue)) {
-        return [NSString stringWithFormat:@"%lld", intValue];
-    }
-    return nil;
-}
-
 static int LxCurrentMarkerEmoteType(void) {
     NSInteger learned = [[NSUserDefaults standardUserDefaults] integerForKey:kLXLearnedEmoteTypeDoubtDefaultsKey];
     if (learned > 0 && learned <= INT_MAX) return (int)learned;
     return kLXEmoteTypeDoubtDefault;
 }
 
+// Synthetic emote lists are cached because table-cell layout calls the getter
+// repeatedly. If the learned marker enum changes, old cached lists may render
+// the wrong icon and must be discarded.
 static void LxClearSyntheticEmoteCacheIfMarkerChanged(void) {
     int markerType = LxCurrentMarkerEmoteType();
     LxEnsureEmoteRuntimeSets();
@@ -260,7 +244,7 @@ static NSString *LxMessageStableKey(id message) {
 
     NSArray<NSString *> *directSelectors = @[@"messageId", @"localUUID", @"uuid"];
     for (NSString *selectorName in directSelectors) {
-        NSString *desc = LxSelectorDescription(message, selectorName);
+        NSString *desc = LxTrimmedDescription(LxObjectResult(message, selectorName));
         if (desc.length > 0) {
             return [NSString stringWithFormat:@"%@:%@", selectorName, desc];
         }
@@ -269,7 +253,7 @@ static NSString *LxMessageStableKey(id message) {
     id coreMessage = LxObjectResult(message, @"coreIMMessage");
     if (coreMessage) {
         for (NSString *selectorName in directSelectors) {
-            NSString *desc = LxSelectorDescription(coreMessage, selectorName);
+            NSString *desc = LxTrimmedDescription(LxObjectResult(coreMessage, selectorName));
             if (desc.length > 0) {
                 return [NSString stringWithFormat:@"core.%@:%@", selectorName, desc];
             }
@@ -278,6 +262,8 @@ static NSString *LxMessageStableKey(id message) {
     return [NSString stringWithFormat:@"ptr:%p", message];
 }
 
+// Recalled messages are remapped back to a normal state, so keep our own stable
+// marker to know which bubbles should receive the synthetic React badge.
 static NSMutableSet<NSString *> *LxRecalledMessageKeys(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -345,6 +331,8 @@ static BOOL LxIsRecalledMessage(id message) {
     }
 }
 
+// Store the augmented emote list per message. This prevents duplicate synthetic
+// items when the same IMCoreMessage is queried several times during rendering.
 static id LxCachedSyntheticEmoteListForMessage(id message) {
     NSString *key = LxMessageStableKey(message);
     if (key.length == 0) return nil;
@@ -511,93 +499,6 @@ static BOOL LxEmoteListAddItem(id list, id item) {
     return LxCollectionAddObject(items ?: list, item);
 }
 
-static void LxLogEmoteSelectorProbe(id list, NSString *source) {
-    if (!list || !LxVerboseEmoteLoggingEnabled()) return;
-    LxEnsureEmoteRuntimeSets();
-    NSString *className = NSStringFromClass([list class]) ?: @"(nil)";
-    @synchronized (gLXProbedEmoteListClasses) {
-        if ([gLXProbedEmoteListClasses containsObject:className]) return;
-        [gLXProbedEmoteListClasses addObject:className];
-    }
-    NSArray<NSString *> *selectors = @[
-        @"emoteReplyInfoSArray_Count",
-        @"emoteReplyInfoS_Count",
-        @"emoteReplyInfoSCount",
-        @"emoteReplyInfoSArrayAtIndex:",
-        @"emoteReplyInfoSAtIndex:",
-        @"emoteReplyInfoSArray",
-        @"emoteReplyInfoS",
-        @"addEmoteReplyInfoS:",
-        @"addEmoteReplyInfoSArray:",
-        @"clearEmoteReplyInfoSArray",
-        @"setEmoteReplyInfoS:",
-        @"setEmoteReplyInfoSArray:"
-    ];
-    NSMutableArray<NSString *> *parts = [NSMutableArray arrayWithCapacity:selectors.count];
-    for (NSString *selectorName in selectors) {
-        BOOL responds = [list respondsToSelector:NSSelectorFromString(selectorName)];
-        [parts addObject:[NSString stringWithFormat:@"%@=%@", selectorName, responds ? @"Y" : @"N"]];
-    }
-    LxLogLine(@"[LXEMOTE] selector probe source=%@ class=%@ %@",
-              source ?: @"unknown",
-              className,
-              [parts componentsJoinedByString:@" "]);
-}
-
-static void LxLogInterestingMethods(id object, NSString *tag, NSMutableSet<NSString *> *seenClasses) {
-    if (!object || !seenClasses || !LxVerboseEmoteLoggingEnabled()) return;
-    NSString *className = NSStringFromClass([object class]) ?: @"(nil)";
-    @synchronized (seenClasses) {
-        if ([seenClasses containsObject:className]) return;
-        [seenClasses addObject:className];
-    }
-
-    NSMutableArray<NSString *> *interesting = [NSMutableArray array];
-    for (Class cls = [object class]; cls && interesting.count < 80; cls = class_getSuperclass(cls)) {
-        unsigned int methodCount = 0;
-        Method *methods = class_copyMethodList(cls, &methodCount);
-        for (unsigned int i = 0; i < methodCount && interesting.count < 80; i++) {
-            SEL selector = method_getName(methods[i]);
-            NSString *name = NSStringFromSelector(selector);
-            NSString *lower = [name lowercaseString];
-            if ([lower containsString:@"emote"] ||
-                [lower containsString:@"reply"] ||
-                [lower containsString:@"respond"] ||
-                [lower containsString:@"type"] ||
-                [lower containsString:@"id"] ||
-                [lower containsString:@"array"] ||
-                [lower containsString:@"count"]) {
-                [interesting addObject:name];
-            }
-        }
-        if (methods) free(methods);
-    }
-
-    LxLogLine(@"[LXEMOTE] %@ class=%@ desc=%@ methods=%@",
-              tag ?: @"object",
-              className,
-              LxTrimmedDescription(object),
-              [interesting componentsJoinedByString:@","]);
-}
-
-static void LxDiagnoseEmoteReplyList(id list, NSString *source) {
-    if (!list || !LxVerboseEmoteLoggingEnabled()) return;
-    LxEnsureEmoteRuntimeSets();
-
-    NSUInteger count = LxEmoteItemCount(list);
-    id firstItem = LxFirstEmoteItem(list);
-    LxLogInterestingMethods(list, [NSString stringWithFormat:@"list source=%@ count=%lu", source ?: @"unknown", (unsigned long)count], gLXDiagnosedEmoteListClasses);
-    LxLogEmoteSelectorProbe(list, source);
-    if (firstItem) {
-        LxLogInterestingMethods(firstItem, [NSString stringWithFormat:@"item source=%@", source ?: @"unknown"], gLXDiagnosedEmoteItemClasses);
-        LxLogLine(@"[LXEMOTE] first item fields emoteType=%@ emoteReplyId=%@ respondent=%@ infoS=%@",
-                  LxSelectorDescription(firstItem, @"emoteType"),
-                  LxSelectorDescription(firstItem, @"emoteReplyId"),
-                  LxSelectorDescription(firstItem, @"replyRespondentInfoS"),
-                  LxSelectorDescription(firstItem, @"emoteReplyInfoS"));
-    }
-}
-
 static BOOL LxListHasMarkerEmote(id list) {
     int markerType = LxCurrentMarkerEmoteType();
     NSUInteger count = LxEmoteItemCount(list);
@@ -611,11 +512,11 @@ static BOOL LxListHasMarkerEmote(id list) {
         if (LxIntegerResult(emoteReplyId, @"emoteType", &emoteType) && emoteType == markerType) {
             return YES;
         }
-        NSString *desc = LxSelectorDescription(item, @"emoteType");
+        NSString *desc = LxTrimmedDescription(item);
         if ([[desc uppercaseString] containsString:@"DOUBT"]) {
             return YES;
         }
-        desc = LxSelectorDescription(emoteReplyId, @"emoteType");
+        desc = LxTrimmedDescription(emoteReplyId);
         if ([[desc uppercaseString] containsString:@"DOUBT"]) {
             return YES;
         }
@@ -623,6 +524,8 @@ static BOOL LxListHasMarkerEmote(id list) {
     return NO;
 }
 
+// Real React messages provide safe sample objects/classes. Empty recalled
+// messages reuse this sample shape and only swap messageId + emoteType.
 static void LxRememberEmoteReplySample(id list) {
     if (!list) return;
     id firstItem = LxFirstEmoteItem(list);
@@ -633,12 +536,6 @@ static void LxRememberEmoteReplySample(id list) {
     gLXEmoteReplySampleItem = itemCopy ?: firstItem;
     gLXEmoteReplySampleList = listCopy ?: list;
     LxLearnDoubtEmoteTypeFromItem(firstItem);
-    if (LxVerboseEmoteLoggingEnabled()) {
-        LxLogLine(@"[LXEMOTE] cached sample listClass=%@ itemClass=%@ itemType=%@",
-                  NSStringFromClass([list class]),
-                  NSStringFromClass([firstItem class]),
-            LxSelectorDescription(firstItem, @"emoteType") ?: LxSelectorDescription(LxObjectResult(firstItem, @"emoteReplyId"), @"emoteType"));
-    }
 }
 
 static id LxSyntheticDoubtEmoteItem(id message, id list) {
@@ -676,6 +573,8 @@ static id LxSyntheticDoubtEmoteItem(id message, id list) {
     }
     if (!LxObjectLooksLikeClass(replyId, @"CoreExtendMessage_EmoteReplyId")) return nil;
 
+    // Lanxin stores emoteType inside CoreExtendMessage_EmoteReplyId, not on
+    // CoreExtendMessage_EmoteReplyInfo itself.
     id coreMessageId = LxCoreMessageIdForMessage(message);
     if (!coreMessageId || !LxSetObjectValue(replyId, @"setMessageId:", coreMessageId)) {
         LxLogLine(@"[LXEMOTE] skip synthetic: set nested messageId failed key=%@ replyIdClass=%@ coreMessageIdClass=%@",
@@ -705,13 +604,6 @@ static id LxSyntheticDoubtEmoteItem(id message, id list) {
                   NSStringFromClass([item class]));
         return nil;
     }
-    if (LxVerboseEmoteLoggingEnabled()) {
-        LxLogLine(@"[LXEMOTE] set nested marker emoteType=%d key=%@ itemClass=%@ replyIdClass=%@",
-                  markerType,
-                  LxMessageStableKey(message),
-                  NSStringFromClass([item class]),
-                  NSStringFromClass([replyId class]));
-    }
     return item;
 }
 
@@ -737,12 +629,13 @@ static id LxSyntheticListFromSample(id syntheticItem) {
 
 static id LxAugmentedEmoteReplyInfoList(id message, id originalList) {
     if (!LxIsRecalledMessage(message)) return originalList;
-    if (originalList) LxDiagnoseEmoteReplyList(originalList, @"getter-recalled");
     if (originalList && LxListHasMarkerEmote(originalList)) return originalList;
 
     id cachedList = LxCachedSyntheticEmoteListForMessage(message);
     if (cachedList) return cachedList;
 
+    // Reuse Lanxin's existing React renderer by returning an augmented
+    // emoteReplyInfoList instead of drawing any custom overlay view.
     id syntheticItem = LxSyntheticDoubtEmoteItem(message, originalList);
     if (!syntheticItem) {
         LxEnsureEmoteRuntimeSets();
@@ -762,11 +655,6 @@ static id LxAugmentedEmoteReplyInfoList(id message, id originalList) {
     if ([originalList isKindOfClass:[NSArray class]]) {
         NSMutableArray *array = [(NSArray *)originalList mutableCopy] ?: [NSMutableArray array];
         [array addObject:syntheticItem];
-        if (LxVerboseEmoteLoggingEnabled()) {
-            LxLogLine(@"[LXEMOTE] appended synthetic marker to NSArray key=%@ count=%lu",
-                      LxMessageStableKey(message),
-                      (unsigned long)array.count);
-        }
         objc_setAssociatedObject(array, &kLXSyntheticEmoteListAssociatedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         LxCacheSyntheticEmoteListForMessage(message, array);
         return array;
@@ -776,11 +664,6 @@ static id LxAugmentedEmoteReplyInfoList(id message, id originalList) {
         id listCopy = LxCopyLikeObject(originalList);
         if (listCopy) {
             if (LxEmoteListAddItem(listCopy, syntheticItem)) {
-                if (LxVerboseEmoteLoggingEnabled()) {
-                    LxLogLine(@"[LXEMOTE] appended synthetic marker to copied list key=%@ listClass=%@",
-                              LxMessageStableKey(message),
-                              NSStringFromClass([listCopy class]));
-                }
                 objc_setAssociatedObject(listCopy, &kLXSyntheticEmoteListAssociatedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 LxCacheSyntheticEmoteListForMessage(message, listCopy);
                 return listCopy;
@@ -796,12 +679,6 @@ static id LxAugmentedEmoteReplyInfoList(id message, id originalList) {
             if (LxSetObjectValue(listCopy, @"setEmoteReplyInfoS:", newItems) ||
                 LxSetObjectValue(listCopy, @"setEmoteReplyInfos:", newItems) ||
                 LxSetObjectValue(listCopy, @"setEmoteReplyInfoArray:", newItems)) {
-                if (LxVerboseEmoteLoggingEnabled()) {
-                    LxLogLine(@"[LXEMOTE] rebuilt synthetic marker list key=%@ listClass=%@ count=%lu",
-                              LxMessageStableKey(message),
-                              NSStringFromClass([listCopy class]),
-                              (unsigned long)newItems.count);
-                }
                 objc_setAssociatedObject(listCopy, &kLXSyntheticEmoteListAssociatedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 LxCacheSyntheticEmoteListForMessage(message, listCopy);
                 return listCopy;
@@ -810,11 +687,6 @@ static id LxAugmentedEmoteReplyInfoList(id message, id originalList) {
     }
     id sampleList = LxSyntheticListFromSample(syntheticItem);
     if (sampleList) {
-        if (LxVerboseEmoteLoggingEnabled()) {
-            LxLogLine(@"[LXEMOTE] built synthetic marker list from sample key=%@ listClass=%@",
-                      LxMessageStableKey(message),
-                      NSStringFromClass([sampleList class]));
-        }
         objc_setAssociatedObject(sampleList, &kLXSyntheticEmoteListAssociatedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         LxCacheSyntheticEmoteListForMessage(message, sampleList);
         return sampleList;
@@ -843,6 +715,7 @@ static id LxAugmentedEmoteReplyInfoList(id message, id originalList) {
 - (int)msgState {
     int state = %orig;
     if (state == 6 || state == 7) {
+        // State 6/7 means recalled. Expose it as normal state so content stays visible.
         LxMarkRecalledMessage(self, state, @"msgState");
         LxLogLine(@"[LXPATCH] msgState remap self=%p from=%d to=5", self, state);
         return 5;
@@ -852,6 +725,7 @@ static id LxAugmentedEmoteReplyInfoList(id message, id originalList) {
 
 - (void)setMsgState:(int)state {
     if (state == 6 || state == 7) {
+        // Preserve the original message while remembering it needs a recall marker.
         LxMarkRecalledMessage(self, state, @"setMsgState");
         %orig(5);
         LxLogLine(@"[LXPATCH] setMsgState remap self=%p from=%d to=5", self, state);
@@ -863,7 +737,6 @@ static id LxAugmentedEmoteReplyInfoList(id message, id originalList) {
 - (id)emoteReplyInfoList {
     id list = %orig;
     if (list && LxEmoteItemCount(list) > 0) {
-        LxDiagnoseEmoteReplyList(list, @"getter");
         LxRememberEmoteReplySample(list);
     }
     return LxAugmentedEmoteReplyInfoList(self, list);
@@ -876,7 +749,6 @@ static id LxAugmentedEmoteReplyInfoList(id message, id originalList) {
     }
     LxClearSyntheticEmoteListForMessage(self);
     if (list && LxEmoteItemCount(list) > 0) {
-        LxDiagnoseEmoteReplyList(list, @"setter");
         LxRememberEmoteReplySample(list);
     }
     %orig(list);
