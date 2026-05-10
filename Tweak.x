@@ -14,11 +14,15 @@
 
 static NSString *const kLXBuildID = LX_BUILD_ID;
 
+// 返回主日志文件路径。优先写入 App 沙盒的 Library/Caches，方便在同一个构建号下
+// 追踪本插件的运行日志，并避免不同构建产生的日志互相覆盖。
 static NSString *LxPrimaryLogPath(void) {
     return [NSHomeDirectory() stringByAppendingPathComponent:
             [NSString stringWithFormat:@"Library/Caches/lanxincrack.%@.log", kLXBuildID ?: @"dev"]];
 }
 
+// 返回兜底日志文件路径。当沙盒 Caches 目录不可写或路径解析失败时，日志会落到临时目录；
+// 这样即使主路径失败，也仍能保留启动、Hook 和撤回标识合成的关键诊断信息。
 static NSString *LxFallbackLogPath(void) {
     NSString *tmp = NSTemporaryDirectory();
     if (tmp.length == 0) tmp = @"/tmp";
@@ -26,10 +30,14 @@ static NSString *LxFallbackLogPath(void) {
             [NSString stringWithFormat:@"lanxincrack.%@.log", kLXBuildID ?: @"dev"]];
 }
 
+// 返回构建号记录文件路径。每次插件加载时写入当前 build id 和日志路径，便于确认设备上
+// 实际运行的是哪一个包，避免调试时误看旧版本日志。
 static NSString *LxBuildIDPath(void) {
     return [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Caches/lanxincrack.buildid"];
 }
 
+// 用最小依赖的 POSIX open/write 追加一行日志。这里不用 NSLog，是为了避免被宿主日志系统
+// 过滤，也避免在早期启动阶段依赖更复杂的 Foundation 文件写入行为。
 static BOOL LxAppendRawLineToPath(NSString *path, NSString *line) {
     if (path.length == 0 || line.length == 0) return NO;
     const char *fsPath = [path fileSystemRepresentation];
@@ -44,6 +52,8 @@ static BOOL LxAppendRawLineToPath(NSString *path, NSString *line) {
     return (wrote >= 0 && (size_t)wrote == len);
 }
 
+// 插件统一日志入口。负责补时间、进程名，并先写主路径、失败后写兜底路径；
+// 所有撤回状态、React 标识合成和启动页绕过日志都从这里输出，方便按 build id 排查。
 static void LxLogLine(NSString *format, ...) {
     va_list args;
     va_start(args, format);
@@ -87,6 +97,8 @@ static __strong id gLXEmoteReplySampleList = nil;
 static __strong id gLXEmoteReplySampleItem = nil;
 static __strong NSMutableSet<NSString *> *gLXLoggedSyntheticFailures = nil;
 
+// 懒初始化运行期集合。很多 Hook 可能在不同 UI 刷新路径里触发，因此用 dispatch_once
+// 保证字典和失败日志集合只创建一次，避免 nil 集合导致缓存或去重逻辑失效。
 static void LxEnsureEmoteRuntimeSets(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -95,6 +107,8 @@ static void LxEnsureEmoteRuntimeSets(void) {
     });
 }
 
+// 清空所有已经合成的 React 标识列表。通常在学到新的 TYPE_DOUBT 数值后调用，
+// 因为旧列表里已经写入了旧 emoteType，继续复用会显示错误图标。
 static void LxClearAllSyntheticEmoteLists(void) {
     LxEnsureEmoteRuntimeSets();
     @synchronized (gLXSyntheticEmoteListsByMessageKey) {
@@ -105,6 +119,8 @@ static void LxClearAllSyntheticEmoteLists(void) {
 // 蓝信内部消息对象和 Protobuf 扩展对象没有可用头文件，直接 objc_msgSend 容易因为
 // 返回类型不匹配导致崩溃。下面这些工具函数会先检查 selector、method signature 和
 // 返回类型，再在 @try/@catch 中调用，尽量把私有 API 变化降级为“拿不到值”。
+// 安全获取对象的 description，并截断过长内容。日志里只需要识别类名、messageId、
+// TYPE_DOUBT 等关键信息，过长的 Protobuf 文本会拖慢日志并影响阅读。
 static NSString *LxTrimmedDescription(id value) {
     if (!value) return nil;
     NSString *desc = nil;
@@ -120,6 +136,8 @@ static NSString *LxTrimmedDescription(id value) {
     return desc;
 }
 
+// 跳过 Objective-C type encoding 里的修饰符，例如 const、in/out、oneway。
+// 这样后续判断返回类型时只看真实基础类型，避免因为修饰符误判 selector 是否安全。
 static const char *LxSkipTypeQualifiers(const char *type) {
     if (!type) return "";
     while (*type == 'r' || *type == 'n' || *type == 'N' || *type == 'o' ||
@@ -129,6 +147,8 @@ static const char *LxSkipTypeQualifiers(const char *type) {
     return type;
 }
 
+// 安全调用无参数、对象返回值的 selector。蓝信私有对象版本变化时，selector 可能不存在
+// 或返回类型改变；这里统一检查后再调用，失败时返回 nil，让上层走降级路径。
 static id LxObjectResult(id object, NSString *selectorName) {
     if (!object || selectorName.length == 0) return nil;
     SEL selector = NSSelectorFromString(selectorName);
@@ -144,6 +164,8 @@ static id LxObjectResult(id object, NSString *selectorName) {
     }
 }
 
+// 安全调用无参数、整数返回值的 selector。用于读取 count、emoteType 等字段；
+// 只有返回类型确实是整数/BOOL 时才写入 outValue，避免把对象指针误当数字解析。
 static BOOL LxIntegerResult(id object, NSString *selectorName, long long *outValue) {
     if (!object || selectorName.length == 0 || !outValue) return NO;
     SEL selector = NSSelectorFromString(selectorName);
@@ -160,6 +182,8 @@ static BOOL LxIntegerResult(id object, NSString *selectorName, long long *outVal
     }
 }
 
+// 安全调用一个 int 参数的 setter。主要用于向 CoreExtendMessage_EmoteReplyId 写入
+// emoteType；如果蓝信改名或移除 setter，本函数返回 NO，上层会放弃合成而不是崩溃。
 static BOOL LxSetIntegerValue(id object, NSString *selectorName, int value) {
     if (!object || selectorName.length == 0) return NO;
     SEL selector = NSSelectorFromString(selectorName);
@@ -172,6 +196,8 @@ static BOOL LxSetIntegerValue(id object, NSString *selectorName, int value) {
     }
 }
 
+// 安全调用一个对象参数的 setter。用于写入 messageId、emoteReplyId 或数组字段；
+// 私有 Protobuf 对象不稳定，因此所有写入都集中在这里做 selector 存在性和异常保护。
 static BOOL LxSetObjectValue(id object, NSString *selectorName, id value) {
     if (!object || selectorName.length == 0) return NO;
     SEL selector = NSSelectorFromString(selectorName);
@@ -184,6 +210,8 @@ static BOOL LxSetObjectValue(id object, NSString *selectorName, id value) {
     }
 }
 
+// 尽可能复制一个蓝信私有对象。优先 mutableCopy，是为了后续能安全修改字段；
+// 如果对象只支持 copy，也先复制出来，避免直接改动宿主原始 React 数据。
 static id LxCopyLikeObject(id object) {
     if (!object) return nil;
     @try {
@@ -201,6 +229,8 @@ static id LxCopyLikeObject(id object) {
     return nil;
 }
 
+// 读取当前应该使用的“疑问”emoteType。正常情况下默认值 6 已经由日志验证；
+// 如果运行时从真实 TYPE_DOUBT 样本学到了新值，则优先使用持久化的新值。
 static int LxCurrentMarkerEmoteType(void) {
     NSInteger learned = [[NSUserDefaults standardUserDefaults] integerForKey:kLXLearnedEmoteTypeDoubtDefaultsKey];
     if (learned > 0 && learned <= INT_MAX) return (int)learned;
@@ -222,6 +252,8 @@ static void LxClearSyntheticEmoteCacheIfMarkerChanged(void) {
     }
 }
 
+// 从真实 React item 中学习 TYPE_DOUBT 的整数值。用户手动点过“疑问”后，description
+// 会暴露 TYPE_DOUBT 字样；一旦读到对应 emoteType，就持久化并清空旧 synthetic 缓存。
 static void LxLearnDoubtEmoteTypeFromItem(id item) {
     if (!item) return;
     id emoteReplyId = LxObjectResult(item, @"emoteReplyId");
@@ -243,6 +275,8 @@ static void LxLearnDoubtEmoteTypeFromItem(id item) {
     LxLogLine(@"[LXEMOTE] learned TYPE_DOUBT emoteType=%lld", emoteType);
 }
 
+// 用类名片段判断对象是否像目标私有类。这里不直接依赖 Class 符号，是因为蓝信类可能
+// 不在当前编译环境声明，运行时只需要确认它是安全的 EmoteReplyId 类对象。
 static BOOL LxObjectLooksLikeClass(id object, NSString *classNamePart) {
     if (!object || classNamePart.length == 0) return NO;
     NSString *className = NSStringFromClass([object class]) ?: @"";
@@ -293,6 +327,8 @@ static NSMutableSet<NSString *> *LxRecalledMessageKeys(void) {
     return gLXRecalledMessageKeys;
 }
 
+// 持久化撤回消息 key 集合。最多保留 2000 条，防止长期使用后 NSUserDefaults 过大；
+// 排序后截断只是为了输出稳定，不承担时间顺序语义。
 static void LxPersistRecalledMessageKeys(void) {
     NSArray *allKeys = nil;
     @synchronized (LxRecalledMessageKeys()) {
@@ -305,6 +341,8 @@ static void LxPersistRecalledMessageKeys(void) {
     [[NSUserDefaults standardUserDefaults] setObject:allKeys ?: @[] forKey:kLXRecalledMessageKeysDefaultsKey];
 }
 
+// 标记一条消息曾经被撤回。内存 associated object 解决当前对象生命周期内的快速判断；
+// 稳定 key + NSUserDefaults 解决列表刷新后对象指针变化的问题。
 static void LxMarkRecalledMessage(id message, int rawState, NSString *source) {
     if (!message) return;
     objc_setAssociatedObject(message, &kLXRecalledAssociatedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -325,6 +363,8 @@ static void LxMarkRecalledMessage(id message, int rawState, NSString *source) {
     }
 }
 
+// 从 IMCoreMessage 的 coreIMMessage.messageId 取出蓝信内部消息 ID。
+// 合成 React 标识时必须把这个 ID 写入 EmoteReplyId，否则标识不会绑定到当前消息。
 static id LxCoreMessageIdForMessage(id message) {
     id coreMessage = LxObjectResult(message, @"coreIMMessage");
     id coreMessageId = LxObjectResult(coreMessage, @"messageId");
@@ -332,6 +372,8 @@ static id LxCoreMessageIdForMessage(id message) {
     return nil;
 }
 
+// 判断消息是否被撤回过。优先看当前对象上的 associated 标记，再查持久化 key 集合；
+// 这样同一条消息在 cell 复用或重新拉取后仍能被识别为需要补标识的消息。
 static BOOL LxIsRecalledMessage(id message) {
     if (!message) return NO;
     NSNumber *associated = objc_getAssociatedObject(message, &kLXRecalledAssociatedKey);
@@ -356,6 +398,8 @@ static id LxCachedSyntheticEmoteListForMessage(id message) {
     }
 }
 
+// 缓存某条消息合成后的 emoteReplyInfoList。缓存粒度使用稳定消息 key，而不是对象指针，
+// 是为了适配蓝信列表刷新后重新创建消息对象的情况。
 static void LxCacheSyntheticEmoteListForMessage(id message, id list) {
     NSString *key = LxMessageStableKey(message);
     if (key.length == 0 || !list) return;
@@ -366,6 +410,8 @@ static void LxCacheSyntheticEmoteListForMessage(id message, id list) {
     }
 }
 
+// 清理某条消息的 synthetic React 列表缓存。收到真实 emoteReplyInfoList 更新时调用，
+// 避免真实 React 数据变化后仍显示旧的合成列表。
 static void LxClearSyntheticEmoteListForMessage(id message) {
     NSString *key = LxMessageStableKey(message);
     if (key.length == 0) return;
@@ -376,6 +422,8 @@ static void LxClearSyntheticEmoteListForMessage(id message) {
     }
 }
 
+// 从蓝信的 emoteReplyInfoList 里取出实际 item 集合。不同版本可能使用不同字段名，
+// 所以按多个 selector 尝试；如果传入本身就是 NSArray，则直接当成集合使用。
 static id LxEmoteItemsObject(id list) {
     if (!list) return nil;
     if ([list isKindOfClass:[NSArray class]]) return list;
@@ -392,6 +440,8 @@ static id LxEmoteItemsObject(id list) {
     return nil;
 }
 
+// 安全读取集合数量。React 列表可能是 NSArray，也可能是私有容器；
+// 只要它响应 count，就用 objc_msgSend 读取，异常时统一返回 0。
 static NSUInteger LxCollectionCount(id collection) {
     if (!collection) return 0;
     if ([collection respondsToSelector:@selector(count)]) {
@@ -403,6 +453,8 @@ static NSUInteger LxCollectionCount(id collection) {
     return 0;
 }
 
+// 安全按下标读取集合元素。兼容 objectAtIndex: 和下标访问 selector，
+// 读取失败时返回 nil，避免私有容器越界或 selector 异常影响主线程渲染。
 static id LxCollectionObjectAtIndex(id collection, NSUInteger index) {
     if (!collection || index >= LxCollectionCount(collection)) return nil;
     @try {
@@ -417,12 +469,16 @@ static id LxCollectionObjectAtIndex(id collection, NSUInteger index) {
     return nil;
 }
 
+// 前向声明：下面多个 helper 互相依赖，先声明按下标取 React item 的函数。
 static id LxEmoteItemAtIndex(id list, NSUInteger index);
 
+// 读取 React 列表中的第一个 item。样本学习和复制都只需要一个真实 item 作为模板。
 static id LxFirstEmoteItem(id list) {
     return LxEmoteItemAtIndex(list, 0);
 }
 
+// 向可变集合追加对象。用于 synthetic item 合成后的兜底追加路径；
+// 如果集合不可变或不支持 addObject:，返回 NO 让上层尝试其它 setter。
 static BOOL LxCollectionAddObject(id collection, id object) {
     if (!collection || !object || ![collection respondsToSelector:@selector(addObject:)]) return NO;
     @try {
@@ -433,6 +489,8 @@ static BOOL LxCollectionAddObject(id collection, id object) {
     }
 }
 
+// 读取 emoteReplyInfoList 中 React item 的数量。蓝信私有对象可能暴露 count selector，
+// 也可能只暴露内部数组；这里按多个已观测字段尝试，尽量兼容不同版本。
 static NSUInteger LxEmoteItemCount(id list) {
     if (!list) return 0;
     if ([list isKindOfClass:[NSArray class]]) return [(NSArray *)list count];
@@ -458,6 +516,8 @@ static NSUInteger LxEmoteItemCount(id list) {
     return LxCollectionCount(list);
 }
 
+// 按下标读取 emoteReplyInfoList 中的 React item。优先调用私有的 AtIndex selector，
+// 再退回到内部数组或列表本身，保证样本学习和重复标识检测能覆盖更多数据形态。
 static id LxEmoteItemAtIndex(id list, NSUInteger index) {
     if (!list) return nil;
     if ([list isKindOfClass:[NSArray class]]) return LxCollectionObjectAtIndex(list, index);
@@ -484,6 +544,8 @@ static id LxEmoteItemAtIndex(id list, NSUInteger index) {
     return LxCollectionObjectAtIndex(list, index);
 }
 
+// 向 emoteReplyInfoList 追加一个 synthetic React item。不同蓝信版本可能使用不同 add
+// selector 或数组字段，所以这里先尝试专用 add 方法，再退回到内部集合 addObject:。
 static BOOL LxEmoteListAddItem(id list, id item) {
     if (!list || !item) return NO;
     if ([list isKindOfClass:[NSMutableArray class]]) {
@@ -512,6 +574,8 @@ static BOOL LxEmoteListAddItem(id list, id item) {
     return LxCollectionAddObject(items ?: list, item);
 }
 
+// 判断列表里是否已经有我们的疑问标识。既检查整数 emoteType，也检查 description
+// 中的 DOUBT 字样，目的是避免重复追加 synthetic item 或和用户真实点的疑问重复显示。
 static BOOL LxListHasMarkerEmote(id list) {
     int markerType = LxCurrentMarkerEmoteType();
     NSUInteger count = LxEmoteItemCount(list);
@@ -628,6 +692,8 @@ static id LxSyntheticDoubtEmoteItem(id message, id list) {
     return item;
 }
 
+// 当原消息只有空列表、无法直接在原列表上追加 item 时，用之前缓存的真实列表样本
+// 复制出一份新列表，并把里面的数组字段替换成只包含 synthetic item 的数组。
 static id LxSyntheticListFromSample(id syntheticItem) {
     if (!syntheticItem || !gLXEmoteReplySampleList) return nil;
     id list = LxCopyLikeObject(gLXEmoteReplySampleList);
@@ -648,6 +714,8 @@ static id LxSyntheticListFromSample(id syntheticItem) {
     return nil;
 }
 
+// 给撤回消息返回增强后的 emoteReplyInfoList。普通消息直接返回原列表；撤回消息会尽量
+// 复用原列表副本、内部数组或真实样本列表，最终让蓝信原生 React 渲染器显示疑问标识。
 static id LxAugmentedEmoteReplyInfoList(id message, id originalList) {
     if (!LxIsRecalledMessage(message)) return originalList;
     if (originalList && LxListHasMarkerEmote(originalList)) return originalList;
@@ -716,6 +784,8 @@ static id LxAugmentedEmoteReplyInfoList(id message, id originalList) {
     return originalList;
 }
 
+// Logos 构造器：插件加载后立即记录构建号和日志路径。这个信息用于确认当前设备
+// 运行的包版本，尤其是在反复打包安装时排除“旧 deb 仍在运行”的干扰。
 %ctor {
     @autoreleasepool {
         NSString *buildLine = [NSString stringWithFormat:@"%@\nprimary=%@\nfallback=%@\n",
@@ -731,9 +801,13 @@ static id LxAugmentedEmoteReplyInfoList(id message, id originalList) {
     }
 }
 
-// ---- Anti recall (core remap only) ----
+// ---- 防撤回：只改核心消息状态，并复用蓝信原生 React 标识渲染 ----
+// Hook IMCoreMessage 是防撤回的核心入口：这里拦截撤回状态，保留原消息内容，
+// 同时把“这条消息曾经撤回过”的事实交给后续 emoteReplyInfoList 注入逻辑。
 %hook IMCoreMessage
 
+// 读取消息状态时，把蓝信的撤回状态 6/7 伪装成普通状态 5。
+// 这样 UI 继续渲染原消息内容；撤回事实会先记录下来，稍后通过疑问 React 标识展示。
 - (int)msgState {
     int state = %orig;
     if (state == 6 || state == 7) {
@@ -746,6 +820,8 @@ static id LxAugmentedEmoteReplyInfoList(id message, id originalList) {
     return state;
 }
 
+// 写入消息状态时，同样拦截撤回状态 6/7 并改写成 5。
+// 这能避免数据库或模型层把消息内容替换成“已撤回”提示，同时保留标识注入所需的撤回 key。
 - (void)setMsgState:(int)state {
     if (state == 6 || state == 7) {
         // 服务端/数据库把消息状态写成撤回时，立即改写成正常状态保存，避免内容被替换成撤回提示。
@@ -758,6 +834,8 @@ static id LxAugmentedEmoteReplyInfoList(id message, id originalList) {
     %orig(state);
 }
 
+// 读取 React 表情/回应列表时，记住真实样本，并在撤回消息上补一条 synthetic 疑问标识。
+// 这是最贴近气泡渲染的数据入口，能复用蓝信自己的布局、主题和定位逻辑。
 - (id)emoteReplyInfoList {
     id list = %orig;
     if (list && LxEmoteItemCount(list) > 0) {
@@ -767,6 +845,8 @@ static id LxAugmentedEmoteReplyInfoList(id message, id originalList) {
     return LxAugmentedEmoteReplyInfoList(self, list);
 }
 
+// 写入真实 React 列表时，清理该消息旧的 synthetic 缓存并更新样本。
+// 如果传入的是我们自己合成过的列表，则直接放行，避免递归清缓存导致标识丢失。
 - (void)setEmoteReplyInfoList:(id)list {
     if (objc_getAssociatedObject(list, &kLXSyntheticEmoteListAssociatedKey)) {
         %orig(list);
@@ -782,29 +862,43 @@ static id LxAugmentedEmoteReplyInfoList(id message, id originalList) {
 
 %end
 
-// ---- Watermark disable ----
+// ---- 水印关闭：让组织水印配置在模型层始终表现为关闭 ----
+// Hook 组织客户端模型中的水印配置，覆盖 getter 和 setter，避免 UI 根据远端配置重新开启水印。
 %hook LxOrgClientModel
 
+// 读取是否展示水印时固定返回 NO。
 - (BOOL)show_watermark { return NO; }
+// 读取水印类型时返回 nil，避免下游继续根据类型数组创建水印视图。
 - (id)show_watermark_types { return nil; }
+// 写入水印开关时强制写入 NO，防止远端配置刷新后把水印重新打开。
 - (void)setShow_watermark:(BOOL)show { %orig(NO); }
+// 写入水印类型时强制写入 nil，清掉可能驱动水印展示的类型配置。
 - (void)setShow_watermark_types:(id)types { %orig(nil); }
 
 %end
 
+// Hook 水印服务层。模型层配置之外，实际视图创建和规则判断也可能从服务类触发，
+// 所以这里把服务层的展示判断、配置入口和刷新入口全部改成无水印行为。
 %hook WatermarkService
 
+// 静态隐藏水印入口固定传入 YES，确保调用方请求展示时也会被改成隐藏。
 + (void)hiddenWatermark:(BOOL)hidden { %orig(YES); }
+// 服务层判断是否展示水印时固定返回 NO。
 - (BOOL)isShowWatermark { return NO; }
+// 水印规则匹配固定返回 NO，避免任何页面命中水印展示规则。
 - (BOOL)complyWatermarkRule:(id)viewController { return NO; }
+// 配置页面水印时直接空实现，避免向 viewController 添加水印视图。
 - (void)configViewControllerWatermark:(id)viewController {}
+// 水印日期刷新直接空实现，避免后台刷新逻辑再次触发展示。
 - (void)updateWatermarkDateIfNeeded {}
 
 %end
 
-// ---- Splash skip ----
+// ---- 启动页跳过：直接执行启动页完成回调 ----
+// Hook 启动页管理器，优先调用 gestureBiometricBlock，绕过开屏页等待流程。
 %hook LxSplashManager
 
+// 启动页展示入口。存在完成回调时直接执行并返回；没有回调时保留原逻辑作为兜底。
 + (void)startPageViewShowWithOid:(int)oid launchOptions:(id)launchOptions gestureBiometricBlock:(id)gestureBiometricBlock {
     if (gestureBiometricBlock) {
         ((void (^)(void))gestureBiometricBlock)();
@@ -816,42 +910,70 @@ static id LxAugmentedEmoteReplyInfoList(id message, id originalList) {
 
 %end
 
-// ---- Jailbreak bypass ----
+// ---- 越狱检测绕过：把多个混淆检测入口统一改成“未越狱”或空操作 ----
+// 这一组混淆类名来自蓝信运行时符号，主要负责不同维度的越狱/Root 环境检查。
 %hook sub_1000010100215841
+// 越狱检测布尔入口固定返回 NO，表示未检测到风险。
 + (BOOL)sub_1000010100215849 { return NO; }
+// 越狱检测副作用入口空实现，避免继续执行文件/进程/环境扫描。
 + (void)sub_1000010100215846 {}
+// 越狱检测副作用入口空实现，避免触发后续上报或退出逻辑。
 + (void)sub_1000010100215842 {}
+// 越狱检测副作用入口空实现，保持调用链可返回但不做检查。
 + (void)sub_1000010100215847 {}
+// 越狱检测副作用入口空实现，覆盖同组混淆检测方法。
 + (void)sub_1000010100215845 {}
 %end
 
+// 第二组混淆越狱检测入口，全部固定返回 NO，表示各项检查均未命中。
 %hook sub_1000010100215832
+// 混淆检测布尔入口固定返回 NO。
 + (BOOL)sub_1000010100215833 { return NO; }
+// 混淆检测布尔入口固定返回 NO。
 + (BOOL)sub_1000010100215834 { return NO; }
+// 混淆检测布尔入口固定返回 NO。
 + (BOOL)sub_1000010100215837 { return NO; }
 %end
 
+// 自动检测入口固定关闭，避免启动或前台切换时触发越狱检查。
 %hook sub_2105813100215866
+// autoCheck 固定返回 NO，表示无需自动检测。
 + (BOOL)autoCheck { return NO; }
 %end
 
+// 带参数的混淆检测入口固定返回 NO，忽略传入的检测上下文。
 %hook sub_1000010100215866
+// 参数化检测入口固定返回 NO，避免根据 arg1 触发风险判定。
 + (BOOL)sub_1000010100215867:(id)arg1 { return NO; }
 %end
 
+// Root 检测调度类：两个调度方法都改成空实现，阻断后续具体检查。
 %hook sub_3108813100215323
+// 自动检查调度入口空实现。
 + (void)autocheck {}
+// Root 检查调度入口空实现。
 + (void)checkRoot {}
 %end
 
+// CoreMessUtils 是更直观的越狱检测工具类，多数调用方会直接查询这些布尔方法。
+// 全部返回 NO，让上层业务认为当前设备不是越狱环境。
 %hook CoreMessUtils
+// 越狱检测入口固定返回 NO。
 + (BOOL)isJailBreak { return NO; }
+// 越狱检测入口固定返回 NO。
 + (BOOL)isJailBreak1 { return NO; }
+// 越狱检测入口固定返回 NO。
 + (BOOL)isJailBreak2 { return NO; }
+// 越狱检测入口固定返回 NO。
 + (BOOL)isJailBreak3 { return NO; }
+// 越狱检测入口固定返回 NO。
 + (BOOL)isJailBreak4 { return NO; }
+// 越狱检测入口固定返回 NO。
 + (BOOL)isJailBreak5 { return NO; }
+// 越狱检测入口固定返回 NO。
 + (BOOL)isJailBreak6 { return NO; }
+// 越狱检测入口固定返回 NO。
 + (BOOL)isJailBreak7 { return NO; }
+// 越狱检测入口固定返回 NO。
 + (BOOL)isJailBreak8 { return NO; }
 %end
