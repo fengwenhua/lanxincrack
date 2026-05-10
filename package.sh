@@ -2,7 +2,7 @@
 set -euo pipefail
 
 BUILD_ID="$(date +%Y%m%d%H%M%S)"
-PKG_VERSION="0.0.3+${BUILD_ID}"
+PKG_VERSION="0.0.4+${BUILD_ID}"
 DEB_PATH="packages/com.lanxin.crack_${PKG_VERSION}_iphoneos-arm64.deb"
 
 echo "BUILD_ID=${BUILD_ID}"
